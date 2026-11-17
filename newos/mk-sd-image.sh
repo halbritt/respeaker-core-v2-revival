@@ -202,6 +202,17 @@ if [[ -x $ODAS/bin/odaslive ]]; then
 else
 	echo "warning: $ODAS not built; the image will have no odaslive (STT_SOURCE=odas will fail)" >&2
 fi
+# Silero VAD model for the speech gate (MIT, github.com/snakers4/silero-vad), pinned by hash
+VAD_URL=https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx
+VAD_SHA=2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f
+VAD=$HERE/out/silero_vad.onnx
+[[ -s $VAD ]] || curl -fsSL -o "$VAD" "$VAD_URL" || true
+if echo "$VAD_SHA  $VAD" | sha256sum -c --status 2>/dev/null; then
+	install -m 644 "$VAD" "$R/opt/rsp-stt/silero_vad.onnx"
+else
+	rm -f "$VAD"
+	echo "warning: could not fetch the Silero VAD model; the speech gate will be off" >&2
+fi
 # keep a core file if odaslive crashes
 mkdir -p "$R/etc/sysctl.d" "$R/etc/systemd/system/rsp-stt.service.d" "$R/etc/tmpfiles.d"
 echo 'kernel.core_pattern=/var/tmp/odas-cores/core.%e.%p.%t' > "$R/etc/sysctl.d/60-odas-core.conf"
@@ -215,7 +226,7 @@ cat > "$R/usr/local/sbin/rsp-firstboot" <<'EOF'
 set -e
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-apt-get install -y -q --no-install-recommends python3-numpy alsa-utils libfftw3-single3 libconfig11 libpulse0 libasound2t64
+apt-get install -y -q --no-install-recommends python3-numpy python3-onnxruntime alsa-utils libfftw3-single3 libconfig11 libpulse0 libasound2t64
 for i in 1 2 3 4 5 6; do amixer -q -c 0 sset "ADC$i PGA gain" 24; done
 alsactl store
 systemctl enable --now rsp-stt.service

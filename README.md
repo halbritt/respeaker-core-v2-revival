@@ -57,6 +57,11 @@ arecord (8 ch, 16 kHz, S32) --FIFO--> odaslive --+-- tracked sources (JSON, TCP 
   utterance. `separate` segments each tracked source on its own.
 - Utterances end after 1.5 s of silence, or at the next short pause once they pass 12 s, with
   a hard cap of 25 s.
+- Before an utterance is sent, a speech gate ([Silero VAD](https://github.com/snakers4/silero-vad)
+  through onnxruntime) checks that it contains at least 200 ms of continuous speech. Keyboards,
+  doors and fans trigger the energy detector and ODAS, and Whisper writes plausible sentences
+  for them. The gate runs only on finished utterances and stops at the first speech it finds,
+  so it adds about 0.1-0.3 s to speech and nothing to the capture path.
 - Transcripts that are only Whisper's noise artefacts (`*music*`, lone punctuation, a short
   list of stock phrases) are dropped; `STT_ODAS_IGNORE` drops whole directions.
 - `STT_SOURCE=arecord` bypasses ODAS and averages the six mics (works on the vendor image).
@@ -155,7 +160,6 @@ Developed without a serial console, so a failed boot recovers on its own:
 - Playback (the on-chip DAC), echo cancellation, a local wake-word model and the LED ring
   are not set up. The loopback channels are captured but unused.
 - Mic gain is 24 dB: at 28 dB a talker close to the board peaked at -0.8 dBFS. Not calibrated further.
-- Whisper occasionally invents a sentence from noise that ODAS tracked as a source.
 
 ## Licences
 

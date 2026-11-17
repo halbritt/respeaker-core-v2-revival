@@ -89,6 +89,16 @@ REC_DIR   = env("STT_REC_DIR", os.path.expanduser("~/recordings"))
 #   GET /events   Server-Sent Events: speech_start, speech_end, utterance (JSON data)
 #   GET /recent   the last utterances as a JSON array
 # Off when empty. Bind to 127.0.0.1 unless the LAN should be able to read what is said.
+# Speech gate: an utterance is sent to the server only if the Silero VAD model hears at least
+# this much continuous speech in it (0 = gate off). The energy VAD and ODAS also fire on
+# keyboards, doors and fans, and Whisper writes plausible sentences for those. Needs
+# python3-onnxruntime and the model file; without either the gate is off, with a warning.
+SPEECH_MIN_MS = env("STT_SPEECH_MIN_MS", 200, int)
+SPEECH_MODEL = env("STT_SPEECH_MODEL", "/opt/rsp-stt/silero_vad.onnx")
+SPEECH_AUDIT = env("STT_SPEECH_AUDIT", "0") == "1"   # transcribe rejected audio too, and log it
+# Experiments: keep every utterance sent to the server as <dir>/<n>.wav plus a line in
+# <dir>/index.jsonl with the raw transcript. Off by default; it stores room speech.
+SAVE_DIR  = env("STT_SAVE_DIR", "")
 HTTP_ADDR = env("STT_HTTP", "")
 HTTP_TOKEN = env("STT_HTTP_TOKEN", "")       # if set, clients must send "Authorization: Bearer <token>"
 
@@ -236,13 +246,81 @@ def duplicate(t_start, t_end, text):
             return True
     return False
 
+GATE = []     # [onnxruntime session] once loaded, [None] if unavailable
+
+def speech_session():
+    if not GATE:
+        GATE.append(None)
+        try:
+            # Debian's onnxruntime prints hundreds of harmless "Schema error" lines on import
+            saved = os.dup(2); null = os.open(os.devnull, os.O_WRONLY); os.dup2(null, 2)
+            try:
+                import onnxruntime as ort
+                so = ort.SessionOptions()
+                so.intra_op_num_threads = so.inter_op_num_threads = 1
+                GATE[0] = ort.InferenceSession(SPEECH_MODEL, so, providers=["CPUExecutionProvider"])
+            finally:
+                os.dup2(saved, 2); os.close(saved); os.close(null)
+        except Exception as e:
+            log("warn: speech gate off (%s)" % str(e).splitlines()[0][:120])
+    return GATE[0]
+
+def has_speech(pcm):
+    """True if Silero finds SPEECH_MIN_MS of continuous speech; stops at the first such run.
+    True as well when the gate is off or unavailable."""
+    sess = speech_session() if SPEECH_MIN_MS > 0 and np is not None else None
+    if sess is None:
+        return True
+    x = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+    # the beamformer output is quiet; bring its peaks to half scale, as the model expects
+    peak = float(np.percentile(np.abs(x), 99.9)) if len(x) else 0.0
+    x = np.clip(x * min(0.5 / (peak + 1e-9), 30.0), -1.0, 1.0)
+    state = np.zeros((2, 1, 128), np.float32); ctx = np.zeros(64, np.float32)
+    sr = np.array(16000, np.int64); run = 0; need = max(1, SPEECH_MIN_MS // 32)
+    for i in range(0, len(x) - 511, 512):       # the model takes 32 ms chunks + 4 ms context
+        chunk = x[i:i + 512]
+        prob, state = sess.run(None, {"input": np.concatenate([ctx, chunk])[None, :],
+                                      "state": state, "sr": sr})
+        ctx = chunk[-64:]
+        run = run + 1 if prob[0, 0] > 0.5 else 0
+        if run >= need:
+            return True
+    return False
+
+SAVED = [0]
+
+def save_utterance(pcm, raw, meta):
+    try:
+        os.makedirs(SAVE_DIR, exist_ok=True)
+        SAVED[0] += 1
+        name = "%04d.wav" % SAVED[0]
+        with open(os.path.join(SAVE_DIR, name), "wb") as f:
+            f.write(wav_bytes(pcm))
+        with open(os.path.join(SAVE_DIR, "index.jsonl"), "a") as f:
+            f.write(json.dumps(dict(meta, file=name, raw=raw)) + "\n")
+    except OSError as e:
+        log("warn: cannot save utterance: %s" % e)
+
 def handle(frames, meta):
     ab = bool(frames) and isinstance(frames[0], tuple)
     pcm = b"".join(f[0] for f in frames) if ab else b"".join(frames)
     dur = len(pcm) / 2.0 / RATE
     t0 = time.time()
+    if not has_speech(pcm):
+        said = ""
+        if SPEECH_AUDIT:
+            try:
+                said = " (whisper: %s)" % transcribe(pcm).replace("\n", " / ")[:80]
+            except Exception:
+                pass
+        log("drop: no speech in %.1fs utterance%s%s" % (
+            dur, " az=%d" % meta["az"] if "az" in meta else "", said))
+        return
     try:
-        text = clean(transcribe(pcm))
+        raw = transcribe(pcm)
+        text = clean(raw)
+        if SAVE_DIR:
+            save_utterance(pcm, raw, meta)
         if ab:
             meta = dict(meta, text_pf=clean(transcribe(b"".join(f[1] for f in frames))))
     except Exception as e:
