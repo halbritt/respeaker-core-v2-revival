@@ -1165,6 +1165,25 @@ static const struct of_device_id ac108_dt_ids[] = {
 };
 MODULE_DEVICE_TABLE(of, ac108_dt_ids);
 
+/*
+ * The DAI ops of chip 0 configure every chip through i2c_clt[], and ASoC calls
+ * set_fmt only once, when the card binds. So the component must not exist
+ * before every chip described in the device tree has been initialised:
+ * otherwise a late chip keeps its reset-default format and its channels come
+ * out misframed.
+ */
+static bool ac108_peer_pending(void)
+{
+	struct device_node *np;
+	bool pending = false;
+
+	for_each_compatible_node(np, NULL, "x-powers,ac108-micarray-1")
+		if (of_device_is_available(np) && !i2c_clt[1])
+			pending = true;
+
+	return pending;
+}
+
 static int ac108_i2c_probe(struct i2c_client *i2c)
 {
 	const unsigned int *chip_idx = i2c_get_match_data(i2c);
@@ -1175,6 +1194,10 @@ static int ac108_i2c_probe(struct i2c_client *i2c)
 	if (!chip_idx || *chip_idx >= ARRAY_SIZE(i2c_clt))
 		return -EINVAL;
 	idx = *chip_idx;
+
+	if (idx == 0 && ac108_peer_pending())
+		return dev_err_probe(&i2c->dev, -EPROBE_DEFER,
+				     "waiting for the second ac108\n");
 
 	ac108 = devm_kzalloc(&i2c->dev, sizeof(*ac108), GFP_KERNEL);
 	if (!ac108)
@@ -1194,8 +1217,8 @@ static int ac108_i2c_probe(struct i2c_client *i2c)
 
 	/*
 	 * Only chip 0 is a sound component: its DAI ops drive every chip on the
-	 * bus through i2c_clt[], as in the vendor 4.4 driver. Chip 1 just needs
-	 * to be probed first-or-later and initialised.
+	 * bus through i2c_clt[], as in the vendor 4.4 driver. Chip 1 is ready
+	 * by now, see ac108_peer_pending().
 	 */
 	if (idx == 0) {
 		ret = devm_snd_soc_register_component(&i2c->dev,

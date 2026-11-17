@@ -7,12 +7,11 @@ Port of the X-Powers AC108 driver from Seeed's 4.4 vendor kernel
 (respeaker/source_builder patch 0004) to the component API. The PLL setup
 that the vendor tree did from a patched simple-card moves into hw_params.
 
-Signed-off-by: ReSpeaker port <respeaker-port@localhost>
 ---
 diff -Naur a/sound/soc/codecs/ac108.c b/sound/soc/codecs/ac108.c
---- a/sound/soc/codecs/ac108.c	1969-12-31 16:00:00.000000000 -0800
-+++ b/sound/soc/codecs/ac108.c	2026-11-16 23:54:54.682389274 -0800
-@@ -0,0 +1,1237 @@
+--- /dev/null
++++ b/sound/soc/codecs/ac108.c
+@@ -0,0 +1,1260 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * ac108.c  --  ac108 ALSA Soc Audio driver
@@ -1180,6 +1179,25 @@ diff -Naur a/sound/soc/codecs/ac108.c b/sound/soc/codecs/ac108.c
 +};
 +MODULE_DEVICE_TABLE(of, ac108_dt_ids);
 +
++/*
++ * The DAI ops of chip 0 configure every chip through i2c_clt[], and ASoC calls
++ * set_fmt only once, when the card binds. So the component must not exist
++ * before every chip described in the device tree has been initialised:
++ * otherwise a late chip keeps its reset-default format and its channels come
++ * out misframed.
++ */
++static bool ac108_peer_pending(void)
++{
++	struct device_node *np;
++	bool pending = false;
++
++	for_each_compatible_node(np, NULL, "x-powers,ac108-micarray-1")
++		if (of_device_is_available(np) && !i2c_clt[1])
++			pending = true;
++
++	return pending;
++}
++
 +static int ac108_i2c_probe(struct i2c_client *i2c)
 +{
 +	const unsigned int *chip_idx = i2c_get_match_data(i2c);
@@ -1190,6 +1208,10 @@ diff -Naur a/sound/soc/codecs/ac108.c b/sound/soc/codecs/ac108.c
 +	if (!chip_idx || *chip_idx >= ARRAY_SIZE(i2c_clt))
 +		return -EINVAL;
 +	idx = *chip_idx;
++
++	if (idx == 0 && ac108_peer_pending())
++		return dev_err_probe(&i2c->dev, -EPROBE_DEFER,
++				     "waiting for the second ac108\n");
 +
 +	ac108 = devm_kzalloc(&i2c->dev, sizeof(*ac108), GFP_KERNEL);
 +	if (!ac108)
@@ -1209,8 +1231,8 @@ diff -Naur a/sound/soc/codecs/ac108.c b/sound/soc/codecs/ac108.c
 +
 +	/*
 +	 * Only chip 0 is a sound component: its DAI ops drive every chip on the
-+	 * bus through i2c_clt[], as in the vendor 4.4 driver. Chip 1 just needs
-+	 * to be probed first-or-later and initialised.
++	 * bus through i2c_clt[], as in the vendor 4.4 driver. Chip 1 is ready
++	 * by now, see ac108_peer_pending().
 +	 */
 +	if (idx == 0) {
 +		ret = devm_snd_soc_register_component(&i2c->dev,
@@ -1251,8 +1273,8 @@ diff -Naur a/sound/soc/codecs/ac108.c b/sound/soc/codecs/ac108.c
 +MODULE_AUTHOR("panjunwen");
 +MODULE_LICENSE("GPL");
 diff -Naur a/sound/soc/codecs/ac108.h b/sound/soc/codecs/ac108.h
---- a/sound/soc/codecs/ac108.h	1969-12-31 16:00:00.000000000 -0800
-+++ b/sound/soc/codecs/ac108.h	2026-11-16 23:54:47.562987025 -0800
+--- /dev/null
++++ b/sound/soc/codecs/ac108.h
 @@ -0,0 +1,810 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
@@ -2065,8 +2087,8 @@ diff -Naur a/sound/soc/codecs/ac108.h b/sound/soc/codecs/ac108.h
 +
 +#endif
 diff -Naur a/sound/soc/codecs/Kconfig b/sound/soc/codecs/Kconfig
---- a/sound/soc/codecs/Kconfig	2026-11-16 23:07:14.460989194 -0800
-+++ b/sound/soc/codecs/Kconfig	2026-11-16 23:07:14.461350538 -0800
+--- a/sound/soc/codecs/Kconfig
++++ b/sound/soc/codecs/Kconfig
 @@ -427,6 +427,15 @@
  	tristate
  	depends on ABX500_CORE
@@ -2084,8 +2106,8 @@ diff -Naur a/sound/soc/codecs/Kconfig b/sound/soc/codecs/Kconfig
  	tristate "Build generic ASoC AC97 CODEC driver"
  	select SND_AC97_CODEC
 diff -Naur a/sound/soc/codecs/Makefile b/sound/soc/codecs/Makefile
---- a/sound/soc/codecs/Makefile	2026-11-16 23:07:14.461218610 -0800
-+++ b/sound/soc/codecs/Makefile	2026-11-16 23:07:14.461422814 -0800
+--- a/sound/soc/codecs/Makefile
++++ b/sound/soc/codecs/Makefile
 @@ -1,6 +1,7 @@
  # SPDX-License-Identifier: GPL-2.0
  snd-soc-88pm860x-y := 88pm860x-codec.o
