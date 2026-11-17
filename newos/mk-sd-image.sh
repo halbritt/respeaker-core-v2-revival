@@ -4,14 +4,106 @@
 #   which loads /boot/uEnv.txt, /boot/vmlinuz-$uname_r, /boot/dtb/$uname_r/$dtb and
 #   /boot/initrd.img-$uname_r from ext4 partition 2 and passes root=PARTUUID=<part 2>.
 #
-# Run as root from newos/:  sudo WIFI_SSID=<network> ./mk-sd-image.sh [--armed]
-#   --armed   write /boot/uEnv.txt (the board boots this card on next reset).
-#             Default writes /boot/uEnv.txt.disabled, so the eMMC system keeps booting.
+# Run as root from newos/:  sudo WIFI_SSID=<network> ./mk-sd-image.sh [--armed] [--safety=bringup|release]
+#   --armed                   write /boot/uEnv.txt (the board boots this card on next reset).
+#                             Default writes /boot/uEnv.txt.disabled, so the eMMC system keeps booting.
+#   --safety=bringup|release  boot safety net profile (or SAFETY_PROFILE env; default: bringup).
+#   --bringup / --release     aliases for --safety=bringup / --safety=release.
 # Secrets (wifi passphrase, password hash) are read at build time and never stored here.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-ARMED=0; [[ "${1:-}" == "--armed" ]] && ARMED=1
+ARMED=0
+SAFETY_PROFILE=${SAFETY_PROFILE:-bringup}
+
+usage() {
+	cat <<'EOF'
+Usage: sudo WIFI_SSID=<network> ./mk-sd-image.sh [OPTIONS]
+
+Options:
+  --armed                     Write /boot/uEnv.txt so the board boots this SD card
+                              (default: write /boot/uEnv.txt.disabled)
+  --safety=bringup|release    Boot safety net profile (default: bringup)
+  --safety <bringup|release>  Same as --safety=...
+  --bringup                   Alias for --safety=bringup
+  --release                   Alias for --safety=release
+  -h, --help                  Show this help and exit
+
+Environment:
+  SAFETY_PROFILE              Default profile if not set on CLI (bringup|release)
+  WIFI_SSID                   Wi-Fi network name to configure (required to build)
+  WIFI_PSK                    Wi-Fi passphrase (optional; reads NetworkManager profile)
+  STT_SERVER                  Optional STT server URL for /etc/default/rsp-stt.local
+EOF
+}
+
+parse_args() {
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+			--armed)
+				ARMED=1
+				shift
+				;;
+			--bringup)
+				SAFETY_PROFILE=bringup
+				shift
+				;;
+			--release)
+				SAFETY_PROFILE=release
+				shift
+				;;
+			--safety=*)
+				SAFETY_PROFILE=${1#*=}
+				shift
+				;;
+			--safety)
+				if [[ $# -lt 2 ]]; then
+					echo "error: --safety requires an argument (bringup or release)" >&2
+					exit 2
+				fi
+				SAFETY_PROFILE=$2
+				shift 2
+				;;
+			-h|--help)
+				usage
+				exit 0
+				;;
+			--)
+				shift
+				if [[ $# -gt 0 ]]; then
+					echo "error: unexpected positional argument: $1" >&2
+					exit 2
+				fi
+				;;
+			-*)
+				echo "error: unknown option: $1" >&2
+				usage >&2
+				exit 2
+				;;
+			*)
+				echo "error: unexpected positional argument: $1" >&2
+				usage >&2
+				exit 2
+				;;
+		esac
+	done
+}
+
+parse_args "$@"
+
+case "$SAFETY_PROFILE" in
+	bringup|release) ;;
+	*)
+		echo "error: invalid SAFETY_PROFILE '$SAFETY_PROFILE' (expected bringup or release)" >&2
+		exit 2
+		;;
+esac
+
+if [[ "${RSP_PARSE_ONLY:-0}" == "1" ]]; then
+	printf 'ARMED=%s\nSAFETY_PROFILE=%s\n' "$ARMED" "$SAFETY_PROFILE"
+	exit 0
+fi
+
 OWNER=${SUDO_USER:?run with sudo from your own account}
 DEBS=$HERE/armbian-build/output/debs
 BASE_IMG=$(ls "$HERE"/armbian-build/output/images/*_minimal.img | head -1)
@@ -95,8 +187,11 @@ cp "$MODSRC/$KVER/kernel/drivers/usb/gadget/legacy/g_serial.ko" \
 (cd "$IR" && find . | cpio -o -H newc -R 0:0 --quiet | gzip -9 > "$R/boot/initrd.img-$KVER")
 install -m 755 "$HERE/overlay/sbin/rsp-preinit" "$R/sbin/rsp-preinit"
 mkdir -p "$R/boot-debug"
+printf '%s\n' "$SAFETY_PROFILE" > "$R/etc/rsp-safety"
 
 UENV=$R/boot/uEnv.txt; [[ $ARMED == 1 ]] || UENV=$R/boot/uEnv.txt.disabled
+CMDLINE="rootwait rw earlycon console=ttyS2,115200n8 loglevel=7 panic=5 rspboot"
+[[ "$SAFETY_PROFILE" == "release" ]] && CMDLINE="$CMDLINE rsp_safety=release"
 cat > "$UENV" <<EOF
 # Read by Seeed's u-boot (env import). Rename to uEnv.txt to boot this card.
 uname_r=$KVER
@@ -105,8 +200,8 @@ dtb=rk3229-respeaker-v2.dtb
 fdt_addr_r=0x68000000
 ramdisk_addr_r=0x6a000000
 # panic=5: reboot after a panic so the initramfs can save the log and fall back to eMMC
-# rspboot: initramfs continues into this root; rsp-preinit then runs a 300 s dead-man switch
-cmdline=rootwait rw earlycon console=ttyS2,115200n8 loglevel=7 panic=5 rspboot
+# rspboot: initramfs continues into this root; rsp-preinit handles bring-up dead-man / watchdog handoff
+cmdline=$CMDLINE
 EOF
 
 # --- system configuration (no chroot: plain file edits) --------------------------------
@@ -169,7 +264,7 @@ mkdir -p "$R/etc/systemd/system/multi-user.target.wants"
 ln -sf /usr/lib/systemd/system/wpa_supplicant@.service \
 	"$R/etc/systemd/system/multi-user.target.wants/wpa_supplicant@wlan0.service"
 
-# cancels rsp-preinit's dead-man switch once wifi has an address and sshd runs
+# cancels rsp-preinit's dead-man switch once wifi has an address and sshd runs (bringup only)
 cat > "$R/etc/systemd/system/rsp-keep.service" <<'EOF'
 [Unit]
 Description=Tell the bring-up dead-man switch that this boot is reachable
@@ -178,13 +273,22 @@ Wants=ssh.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c "until ip -4 addr show wlan0 | grep -q inet && systemctl -q is-active ssh; do sleep 2; done; touch /run/rsp-keep"
+ExecStart=/bin/sh -c 'case "$(grep -oE "(^|[[:space:]])rsp_safety=[^[:space:]]*" /proc/cmdline 2>/dev/null | sed "s/^[[:space:]]*rsp_safety=//" | tail -n 1)" in release) exit 0 ;; bringup) ;; "") case "$(sed -n "s/[[:space:]]*#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^[[:space:]]*$/d; p; q" /etc/rsp-safety 2>/dev/null)" in release) exit 0 ;; esac ;; esac; until ip -4 addr show wlan0 | grep -q inet && systemctl -q is-active ssh; do sleep 2; done; touch /run/rsp-keep'
 TimeoutStartSec=0
 
 [Install]
 WantedBy=multi-user.target
 EOF
 ln -sf /etc/systemd/system/rsp-keep.service "$R/etc/systemd/system/multi-user.target.wants/rsp-keep.service"
+
+if [[ "$SAFETY_PROFILE" == "release" ]]; then
+	mkdir -p "$R/etc/systemd/system.conf.d"
+	cat > "$R/etc/systemd/system.conf.d/10-rsp-watchdog.conf" <<'EOF'
+[Manager]
+RuntimeWatchdogSec=15s
+RebootWatchdogSec=2min
+EOF
+fi
 
 # speech-to-text client, ODAS and tools
 install -d "$R/opt/rsp-stt" "$R/opt/odas/bin" "$R/opt/odas/lib" "$R/usr/local/bin"
@@ -260,4 +364,4 @@ ln -sf /usr/lib/systemd/system/serial-getty@.service \
 sync
 umount "$R"; losetup -d "$LOOP_OUT"; LOOP_OUT=
 chown "$OWNER": "$OUT"
-echo "built $OUT (kernel $KVER, armed=$ARMED, root PARTUUID=$PARTUUID)"
+echo "built $OUT (kernel $KVER, armed=$ARMED, safety=$SAFETY_PROFILE, root PARTUUID=$PARTUUID)"

@@ -1,104 +1,311 @@
 #!/bin/busybox sh
-# Debug initramfs for the ReSpeaker Core v2 bring-up: runs entirely from RAM.
+# Debug initramfs for the ReSpeaker Core v2: runs entirely from RAM.
 # LED state2: fast blink = userspace reached, slow blink = SD log written, heartbeat = USB console up.
-/bin/busybox --install -s /bin
-export PATH=/bin
-mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev 2>/dev/null
-exec >/dev/kmsg 2>&1 </dev/null
-echo "rsp-debug-init: started, uptime $(cat /proc/uptime)"
-L="/sys/class/leds/respeaker2:blue:state2"
-led() { echo timer > "$L/trigger" 2>/dev/null; echo $1 > "$L/delay_on"; echo $1 > "$L/delay_off"; }
+if [ "${RSP_TEST_MODE:-0}" = "1" ]; then
+	R=${RSP_ROOT:?}
+	PATH=${RSP_TEST_PATH:?}:$PATH
+	export PATH
+else
+	R=""
+	/bin/busybox --install -s /bin
+	export PATH=/bin
+fi
+mount -t proc proc "$R/proc"; mount -t sysfs sys "$R/sys"; mount -t devtmpfs dev "$R/dev" 2>/dev/null
+if [ "${RSP_TEST_MODE:-0}" != "1" ] || [ -e "$R/dev/kmsg" ]; then
+	exec >>"$R/dev/kmsg" 2>&1 </dev/null
+fi
+echo "rsp-debug-init: started, uptime $(cat "$R/proc/uptime")"
+L="$R/sys/class/leds/respeaker2:blue:state2"
+led() {
+	[ -d "$L" ] || return 0
+	echo timer > "$L/trigger" 2>/dev/null
+	echo "$1" > "$L/delay_on" 2>/dev/null
+	echo "$1" > "$L/delay_off" 2>/dev/null
+}
 led 80
-mkdir -p /cfg; mount -t configfs none /cfg 2>/dev/null
-grep -q rspstay /proc/cmdline && touch /stay
+mkdir -p "$R/cfg"; mount -t configfs none "$R/cfg" 2>/dev/null
+
+has_chardev() {
+	[ -c "$1" ] || { [ "${RSP_TEST_MODE:-0}" = "1" ] && [ -e "$1" ]; }
+}
+
+has_cmdline_flag() {
+	[ -r "$R/proc/cmdline" ] || return 1
+	for _tok in $(cat "$R/proc/cmdline"); do
+		[ "$_tok" = "$1" ] && return 0
+	done
+	return 1
+}
+
+get_cmdline_opt() {
+	_key=$1
+	_val=""
+	if [ -r "$R/proc/cmdline" ]; then
+		for _tok in $(cat "$R/proc/cmdline"); do
+			case "$_tok" in
+				"$_key"=*) _val=${_tok#*=} ;;
+			esac
+		done
+	fi
+	printf '%s\n' "$_val"
+}
+
+resolve_safety_profile() {
+	_sfile=$1
+	_p=$(get_cmdline_opt rsp_safety)
+	if [ -z "$_p" ] && [ -r "$_sfile" ]; then
+		_p=$(sed -n 's/[[:space:]]*#.*//; /^[[:space:]]*$/d; s/^[[:space:]]*//; s/[[:space:]]*$//; p; q' "$_sfile" 2>/dev/null)
+	fi
+	case "$_p" in
+		bringup|release)
+			printf '%s\n' "$_p"
+			;;
+		"")
+			printf '%s\n' "bringup"
+			;;
+		*)
+			echo "rsp-safety: unknown profile '$_p', defaulting to bringup" >&2
+			printf '%s\n' "bringup"
+			;;
+	esac
+}
+
+next_boot_id() {
+	_dir=$1
+	_max=-1
+	for _d in "$_dir"/boot-*; do
+		[ -d "$_d" ] || continue
+		_n=${_d##*/boot-}
+		case "$_n" in ""|*[!0-9]*) continue ;; esac
+		while case "$_n" in 0[0-9]*) _n=${_n#0} ;; *) false ;; esac; do :; done
+		[ "$_n" -gt "$_max" ] && _max=$_n
+	done
+	echo $((_max + 1))
+}
+
+prune_boot_debug() {
+	_dir=$1
+	_keep=${2:-20}
+	_keep_crash=${3:-5}
+	[ -d "$_dir" ] || return 0
+	case "$_keep" in ""|*[!0-9]*) return 0 ;; esac
+	case "$_keep_crash" in ""|*[!0-9]*) _keep_crash=5 ;; esac
+	while case "$_keep" in 0[0-9]*) _keep=${_keep#0} ;; *) false ;; esac; do :; done
+	while case "$_keep_crash" in 0[0-9]*) _keep_crash=${_keep_crash#0} ;; *) false ;; esac; do :; done
+	[ "$_keep" -gt 0 ] || return 0
+
+	_ncount=0
+	_ccount=0
+	for _d in "$_dir"/boot-*; do
+		[ -d "$_d" ] || continue
+		_n=${_d##*/boot-}
+		case "$_n" in ""|*[!0-9]*) continue ;; esac
+		if [ -d "$_d/pstore" ]; then
+			_ccount=$((_ccount + 1))
+		else
+			_ncount=$((_ncount + 1))
+		fi
+	done
+
+	while [ "$_ncount" -gt "$_keep" ]; do
+		_min_val=""
+		_min_dir=""
+		for _d in "$_dir"/boot-*; do
+			[ -d "$_d" ] || continue
+			[ -d "$_d/pstore" ] && continue
+			_n=${_d##*/boot-}
+			case "$_n" in ""|*[!0-9]*) continue ;; esac
+			while case "$_n" in 0[0-9]*) _n=${_n#0} ;; *) false ;; esac; do :; done
+			if [ -z "$_min_val" ] || [ "$_n" -lt "$_min_val" ]; then
+				_min_val=$_n
+				_min_dir=$_d
+			fi
+		done
+		[ -n "$_min_dir" ] || break
+		rm -rf "$_min_dir"
+		_ncount=$((_ncount - 1))
+	done
+
+	while [ "$_ccount" -gt "$_keep_crash" ]; do
+		_min_val=""
+		_min_dir=""
+		for _d in "$_dir"/boot-*; do
+			[ -d "$_d" ] || continue
+			[ -d "$_d/pstore" ] || continue
+			_n=${_d##*/boot-}
+			case "$_n" in ""|*[!0-9]*) continue ;; esac
+			while case "$_n" in 0[0-9]*) _n=${_n#0} ;; *) false ;; esac; do :; done
+			if [ -z "$_min_val" ] || [ "$_n" -lt "$_min_val" ]; then
+				_min_val=$_n
+				_min_dir=$_d
+			fi
+		done
+		[ -n "$_min_dir" ] || break
+		rm -rf "$_min_dir"
+		_ccount=$((_ccount - 1))
+	done
+}
+
+has_cmdline_flag rspstay && touch "$R/stay"
 BASECMD="rootwait rw earlycon console=ttyS2,115200n8 loglevel=7 printk.devkmsg=on log_buf_len=4M"
 
 dump() {   # $1 = directory to write into
-	dmesg > $1/dmesg.new && mv $1/dmesg.new $1/dmesg.txt
-	echo "$2 $(cat /proc/uptime)" > $1/alive.txt
-	cat /proc/cmdline > $1/cmdline.txt; cat /proc/device-tree/model > $1/model.txt 2>/dev/null; grep "^dtb=" /sd/boot/uEnv.txt > $1/dtb.txt 2>/dev/null
-	ls -l /dev /sys/class/block /sys/class/leds /sys/class/net /sys/class/udc > $1/devs.txt 2>&1
+	dmesg > "$1/dmesg.new" && mv "$1/dmesg.new" "$1/dmesg.txt"
+	echo "$2 $(cat "$R/proc/uptime")" > "$1/alive.txt"
+	cat "$R/proc/cmdline" > "$1/cmdline.txt"; cat "$R/proc/device-tree/model" > "$1/model.txt" 2>/dev/null; grep "^dtb=" "$R/sd/boot/uEnv.txt" > "$1/dtb.txt" 2>/dev/null
+	ls -l "$R/dev" "$R/sys/class/block" "$R/sys/class/leds" "$R/sys/class/net" "$R/sys/class/udc" > "$1/devs.txt" 2>&1
 	sync
 }
-sdlog() {
+
+mount_sd() {
 	i=0
-	while [ $i -lt 30 ] && ! ls /dev/mmcblk*p2 >/dev/null 2>&1; do sleep 1; i=$((i+1)); done
-	for p in /dev/mmcblk*p2; do
-		mount -t ext4 $p /sd 2>/dev/null || continue
-		[ -e /sd/sbin/rsp-preinit ] && break
-		umount /sd
+	while [ $i -lt 30 ] && ! ls "$R"/dev/mmcblk*p2 >/dev/null 2>&1; do sleep 1; i=$((i+1)); done
+	for p in "$R"/dev/mmcblk*p2; do
+		[ -e "$p" ] || continue
+		mount -t ext4 "$p" "$R/sd" 2>/dev/null || continue
+		[ -e "$R/sd/sbin/rsp-preinit" ] && return 0
+		umount "$R/sd"
 	done
-	[ -e /sd/sbin/rsp-preinit ] || { echo "rsp-debug-init: SD root not found"; return 1; }
-	n=$(ls /sd/boot-debug 2>/dev/null | grep -c '^boot-'); B=/sd/boot-debug/boot-$n; mkdir -p $B
-	dump $B first && echo "rsp-debug-init: wrote $B"
-	echo $B > /sdlogdir
+	echo "rsp-debug-init: SD root not found"
+	return 1
 }
-sdlog && led 500
+
+sd_mounted=0
+if mount_sd; then
+	sd_mounted=1
+fi
+
+SAFETY_PROFILE=$(resolve_safety_profile "$R/sd/etc/rsp-safety")
+KEEP_N=$(get_cmdline_opt rsp_debug_keep)
+case "$KEEP_N" in
+	""|*[!0-9]*)
+		if [ "$SAFETY_PROFILE" = "release" ]; then KEEP_N=20; else KEEP_N=0; fi
+		;;
+esac
 
 # Crash capture: the previous boot's kernel log survives a watchdog/panic reset in RAM (ramoops).
-# If one is there, save it to the card, disarm the SD boot and return to the eMMC system.
-mount -t pstore pstore /pstore 2>/dev/null
+mount -t pstore pstore "$R/pstore" 2>/dev/null
 # a console log with a clean ending (and no panic record) is not a crash
 crashed=0
-ls /pstore/dmesg-* >/dev/null 2>&1 && crashed=1
+ls "$R"/pstore/dmesg-* >/dev/null 2>&1 && crashed=1
 # clean endings: our own marker, or the kernel's message for an ordinary reboot/poweroff
-[ -e /pstore/console-ramoops-0 ] && ! tail -n 15 /pstore/console-ramoops-0 | grep -q \
+[ -e "$R/pstore/console-ramoops-0" ] && ! tail -n 15 "$R/pstore/console-ramoops-0" | grep -q \
 	-e rsp-clean-reboot -e "reboot: Restarting system" -e "reboot: Power down" && crashed=1
-[ $crashed = 0 ] && rm -f /pstore/* 2>/dev/null
-if [ -s /sdlogdir ] && [ $crashed = 1 ]; then
-	B=$(cat /sdlogdir); mkdir -p $B/pstore; cp /pstore/* $B/pstore/; rm -f /pstore/*
-	echo "rsp-debug-init: saved previous boot log from pstore"; dump $B pstore
-	if ! grep -q rspkeep /proc/cmdline; then
-		mv /sd/boot/uEnv.txt /sd/boot/uEnv.txt.done; sync; umount /sd; { echo rsp-clean-reboot > /dev/kmsg; sleep 1; reboot -f; }
+[ "$crashed" = "0" ] && rm -f "$R"/pstore/* 2>/dev/null
+
+if [ "$sd_mounted" = "1" ]; then
+	if [ "$SAFETY_PROFILE" = "bringup" ] || [ "$crashed" = "1" ]; then
+		mkdir -p "$R/sd/boot-debug"
+		n=$(next_boot_id "$R/sd/boot-debug")
+		B="$R/sd/boot-debug/boot-$n"
+		mkdir -p "$B"
+		dump "$B" first && echo "rsp-debug-init: wrote $B"
+		echo "$B" > "$R/sdlogdir"
+		led 500
 	fi
 fi
-# hardware watchdog: a frozen kernel resets the board after ~10 s
-insmod /lib/dw_wdt.ko 2>&1 && [ -c /dev/watchdog ] && watchdog -T 10 -t 2 /dev/watchdog && echo "rsp-debug-init: watchdog armed"
-# rspboot on the command line: continue into the real root filesystem on the card
-if grep -q rspboot /proc/cmdline && [ -x /sd/sbin/rsp-preinit ]; then
-	echo "rsp-debug-init: switching to the SD root"
-	insmod /lib/g_serial.ko 2>/dev/null
-	umount /pstore 2>/dev/null; umount /cfg 2>/dev/null
-	mount --move /proc /sd/proc; mount --move /sys /sd/sys; mount --move /dev /sd/dev
-	exec switch_root /sd /sbin/rsp-preinit
+
+if [ -s "$R/sdlogdir" ] && [ "$crashed" = "1" ]; then
+	B=$(cat "$R/sdlogdir")
+	mkdir -p "$B/pstore"
+	cp "$R"/pstore/* "$B/pstore/" 2>/dev/null || true
+	rm -f "$R"/pstore/*
+	echo "rsp-debug-init: saved previous boot log from pstore"
+	dump "$B" pstore
+	[ "$KEEP_N" -gt 0 ] && prune_boot_debug "$R/sd/boot-debug" "$KEEP_N" 5
+	if [ "$SAFETY_PROFILE" = "bringup" ]; then
+		if ! has_cmdline_flag rspkeep; then
+			mv "$R/sd/boot/uEnv.txt" "$R/sd/boot/uEnv.txt.done"
+			sync
+			umount "$R/sd"
+			echo rsp-clean-reboot >> "$R/dev/kmsg"
+			sleep 1
+			reboot -f
+			exit 0
+		fi
+	else
+		echo "rsp-debug-init: release mode, preserving uEnv.txt after pstore capture"
+	fi
+elif [ "$sd_mounted" = "1" ] && [ "$KEEP_N" -gt 0 ]; then
+	prune_boot_debug "$R/sd/boot-debug" "$KEEP_N" 5
 fi
-grep -q rspcrash /proc/cmdline && { echo "rsp-debug-init: deliberate panic"; sync; sleep 1; echo c > /proc/sysrq-trigger; }
-cat > /bin/ovl <<'EOT'
+
+# hardware watchdog: arm dw_wdt early; rsp-preinit hands /dev/watchdog off if systemd takes over
+WDOG_OPT=$(get_cmdline_opt rsp_watchdog)
+if [ "$WDOG_OPT" != "0" ]; then
+	if insmod "$R/lib/dw_wdt.ko" 2>&1 && has_chardev "$R/dev/watchdog"; then
+		if [ "$SAFETY_PROFILE" = "release" ]; then
+			watchdog -F -T 15 -t 3 "$R/dev/watchdog" </dev/null >/dev/null 2>&1 &
+		else
+			watchdog -F -T 10 -t 2 "$R/dev/watchdog" </dev/null >/dev/null 2>&1 &
+		fi
+		_wpid=$!
+		if [ "$sd_mounted" = "1" ]; then
+			mkdir -p "$R/sd/run" 2>/dev/null
+			echo "$_wpid" > "$R/sd/run/rsp-watchdog.pid" 2>/dev/null
+		fi
+		echo "rsp-debug-init: watchdog armed"
+	fi
+fi
+
+# rspboot on the command line: continue into the real root filesystem on the card
+if has_cmdline_flag rspboot && [ -x "$R/sd/sbin/rsp-preinit" ]; then
+	echo "rsp-debug-init: switching to the SD root"
+	GS=$(get_cmdline_opt rsp_gserial)
+	case "$GS" in
+		0|1) ;;
+		*)
+			if [ "$SAFETY_PROFILE" = "release" ]; then GS=0; else GS=1; fi
+			;;
+	esac
+	[ "$GS" = "1" ] && insmod "$R/lib/g_serial.ko" 2>/dev/null
+	umount "$R/pstore" 2>/dev/null; umount "$R/cfg" 2>/dev/null
+	mount --move "$R/proc" "$R/sd/proc"; mount --move "$R/sys" "$R/sd/sys"; mount --move "$R/dev" "$R/sd/dev"
+	if [ "${RSP_TEST_MODE:-0}" = "1" ]; then
+		switch_root "$R/sd" /sbin/rsp-preinit
+		exit $?
+	fi
+	exec switch_root "$R/sd" /sbin/rsp-preinit
+fi
+
+has_cmdline_flag rspcrash && { echo "rsp-debug-init: deliberate panic"; sync; sleep 1; echo c > "$R/proc/sysrq-trigger"; exit 0; }
+mkdir -p "$R/bin"
+cat > "$R/bin/ovl" <<'EOT'
 #!/bin/sh
 # ovl <name>: apply /ov/<name>.dtbo; the name is recorded on the SD card first
 B=$(cat /sdlogdir 2>/dev/null)
-[ -n "$B" ] && { echo "$1 $(cat /proc/uptime)" >> $B/overlays.txt; dmesg > $B/dmesg-before-$1.txt; sync; }
-mkdir /cfg/device-tree/overlays/$1 && cat /ov/$1.dtbo > /cfg/device-tree/overlays/$1/dtbo
-echo "applied $1: $(cat /cfg/device-tree/overlays/$1/status 2>&1)"
+[ -n "$B" ] && { echo "$1 $(cat /proc/uptime)" >> "$B/overlays.txt"; dmesg > "$B/dmesg-before-$1.txt"; sync; }
+mkdir "/cfg/device-tree/overlays/$1" && cat "/ov/$1.dtbo" > "/cfg/device-tree/overlays/$1/dtbo"
+echo "applied $1: $(cat "/cfg/device-tree/overlays/$1/status" 2>&1)"
 EOT
-chmod +x /bin/ovl
+chmod +x "$R/bin/ovl"
 
-insmod /lib/g_serial.ko* && echo "rsp-debug-init: g_serial loaded"
+insmod "$R"/lib/g_serial.ko* && echo "rsp-debug-init: g_serial loaded"
 ( while :; do
-	[ -c /dev/ttyGS0 ] && setsid sh -c 'exec sh -i </dev/ttyGS0 >/dev/ttyGS0 2>&1'
+	has_chardev "$R/dev/ttyGS0" && setsid sh -c "exec sh -i <\"$R/dev/ttyGS0\" >\"$R/dev/ttyGS0\" 2>&1"
 	sleep 1
   done ) &
 sleep 1
 # live kernel log to the USB host (it reads /dev/ttyACM0)
-[ -c /dev/ttyGS0 ] && ( cat /dev/kmsg > /dev/ttyGS0 2>/dev/null & )
-[ -c /dev/ttyGS0 ] && echo heartbeat > "$L/trigger"
+has_chardev "$R/dev/ttyGS0" && ( cat "$R/dev/kmsg" > "$R/dev/ttyGS0" 2>/dev/null & )
+has_chardev "$R/dev/ttyGS0" && [ -d "$L" ] && echo heartbeat > "$L/trigger"
 i=0
 while :; do
-	[ -s /sdlogdir ] && dump "$(cat /sdlogdir)" $i
+	[ -s "$R/sdlogdir" ] && dump "$(cat "$R/sdlogdir")" "$i"
 	# after ~50 s move on: next stage from /sd/boot/stages ("<dtb> <extra cmdline>" per line),
-	# or hand the board back to the eMMC system when none is left. touch /stay to hold.
-	if [ $i -ge 25 ] && [ ! -e /stay ] && [ -s /sdlogdir ]; then
-		dump "$(cat /sdlogdir)" final
-		next=$(head -n1 /sd/boot/stages 2>/dev/null)
+	# or hand the board back to the eMMC system when none is left (bringup mode). touch /stay to hold.
+	if [ $i -ge 25 ] && [ ! -e "$R/stay" ] && [ "$sd_mounted" = "1" ]; then
+		[ -s "$R/sdlogdir" ] && dump "$(cat "$R/sdlogdir")" final
+		next=$(head -n1 "$R/sd/boot/stages" 2>/dev/null)
 		if [ -n "$next" ]; then
-			sed -i 1d /sd/boot/stages
+			sed -i 1d "$R/sd/boot/stages"
 			set -- $next; d=$1; shift
-			sed -i -e "s|^dtb=.*|dtb=$d|" -e "s|^cmdline=.*|cmdline=$BASECMD $*|" /sd/boot/uEnv.txt
-			echo "$next" > "$(cat /sdlogdir)/next-stage.txt"
-		else
-			mv /sd/boot/uEnv.txt /sd/boot/uEnv.txt.done
+			sed -i -e "s|^dtb=.*|dtb=$d|" -e "s|^cmdline=.*|cmdline=$BASECMD $*|" "$R/sd/boot/uEnv.txt"
+			[ -s "$R/sdlogdir" ] && echo "$next" > "$(cat "$R/sdlogdir")/next-stage.txt"
+		elif [ "$SAFETY_PROFILE" = "bringup" ]; then
+			mv "$R/sd/boot/uEnv.txt" "$R/sd/boot/uEnv.txt.done"
 		fi
-		sync; umount /sd; { echo rsp-clean-reboot > /dev/kmsg; sleep 1; reboot -f; }
+		sync; umount "$R/sd"; { echo rsp-clean-reboot >> "$R/dev/kmsg"; sleep 1; reboot -f; exit 0; }
 	fi
 	i=$((i+1)); sleep 2
 done

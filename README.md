@@ -128,8 +128,17 @@ card inserted the board boots it; without it, the system on the eMMC boots.
 ```
 # in newos/armbian-build (Armbian framework, with port/ files under userpatches/):
 ./compile.sh build BOARD=rk322x-box BRANCH=current RELEASE=trixie BUILD_MINIMAL=yes KERNEL_CONFIGURE=no
-sudo WIFI_SSID=<network> ./mk-sd-image.sh --armed
+sudo WIFI_SSID=<network> ./mk-sd-image.sh --armed                 # bring-up safety net (default)
+sudo WIFI_SSID=<network> ./mk-sd-image.sh --armed --release       # release profile
 ```
+
+Options:
+
+- `--armed`: writes `/boot/uEnv.txt` so the board boots the card on reset (default writes
+  `/boot/uEnv.txt.disabled`).
+- `--safety=bringup|release` (or `--bringup` / `--release`, or `SAFETY_PROFILE` env; default
+  `bringup`): selects the boot safety net profile written to `/etc/rsp-safety` and
+  `uEnv.txt`.
 
 Two things that cost the most time, for anyone porting to a similar board:
 
@@ -141,15 +150,32 @@ Two things that cost the most time, for anyone porting to a similar board:
 
 ### Boot safety net
 
-Developed without a serial console, so a failed boot recovers on its own:
+Developed without a serial console, the boot safety net supports two profiles (resolved in
+order: kernel cmdline `rsp_safety=bringup|release` > `/etc/rsp-safety` > default `bringup`):
 
-- The initramfs arms the hardware watchdog and reads `/sys/fs/pstore`. If the previous boot
-  panicked or hung, it saves that kernel log to `/boot-debug/` on the card, renames
-  `uEnv.txt` so the bootloader falls back to the eMMC, and resets.
-- `/sbin/rsp-preinit` runs a dead-man switch: no wifi address and sshd within 300 s means the
-  same fallback, with the journal saved.
-- `newos/debug-initrd/` has the staged device-tree test runner, a USB-serial shell for the
-  initramfs, and live device-tree overlays used to bisect the boot crash.
+- **Bring-up mode (`--bringup`, default)**: Protects headless kernel/DTB bring-up.
+  The initramfs (`newos/debug-initrd/init`) loads `dw_wdt.ko`, arms the hardware watchdog,
+  reads `/sys/fs/pstore`, and saves every boot's logs to `/boot-debug/`. If the previous
+  boot panicked or hung (unless `rspkeep` is on the kernel command line), it renames
+  `uEnv.txt` to `uEnv.txt.done` and resets to the eMMC system. `/sbin/rsp-preinit` then
+  logs early `dmesg` and runs a 300 s dead-man switch (`rsp_deadman=`) waiting for
+  `rsp-keep.service` (wifi IPv4 address + active `ssh`); if it times out, it saves the
+  journal, renames `uEnv.txt`, and resets to eMMC.
+- **Release mode (`--release` / `--safety=release`)**: Avoids permanent self-fallback to
+  eMMC (or unbootable eMMC installs) after a sudden power loss, brownout, or >300 s wifi
+  outage, and eliminates the 900 s per-boot `dmesg`/`sync` loop. The unified initramfs still
+  clears clean `/sys/fs/pstore/*`, captures crash logs to `/boot-debug/` only when a
+  `pstore` crash/unclean marker is present (preserving `uEnv.txt` and rotating `/boot-debug/`
+  with monotonic IDs, keeping 20 normal and 5 crash directories by default via
+  `rsp_debug_keep`), skips initramfs `g_serial.ko` (overridable via `rsp_gserial=1`), and
+  loads `dw_wdt.ko` early. `/sbin/rsp-preinit` skips the dead-man switch and polling loop and
+  hands `/dev/watchdog` off cleanly to `systemd` (`RuntimeWatchdogSec=15s`,
+  `RebootWatchdogSec=2min`, within `dw_wdt`'s ~21.5 s max hardware period).
+- `newos/debug-initrd/` also contains the staged device-tree test runner (`run-stage.sh`),
+  a USB-serial shell for the initramfs, and live device-tree overlays used to bisect boot
+  crashes. When running `newos/debug-initrd/run-stage.sh` against a `--release`-built SD
+  card, pass `rsp_safety=bringup` in `run-stage.sh`'s `[extra cmdline]` argument so the
+  debug stage runner disarms `uEnv.txt` and falls back to eMMC once `stages` completes.
 
 ## Known gaps
 
