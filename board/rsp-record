@@ -1,0 +1,24 @@
+#!/bin/sh
+# rsp-record [seconds] [label] - save the raw mic array capture for later replay (rsp-replay).
+# The running rsp-stt service does the recording, so live transcription carries on.
+# Format: 8 channels, 16 kHz, signed 32-bit little-endian, headerless (what ODAS reads).
+# The second blue LED is lit while recording. Recordings go to ~/recordings, capped at
+# RSP_REC_CAP_MB (default 2000 MB) with the oldest deleted first.
+secs=${1:-180}; label=${2:-take}
+run=/run/rsp-stt; dir=$HOME/recordings; cap=${RSP_REC_CAP_MB:-2000}
+led="/sys/class/leds/respeaker2:blue:state2"
+systemctl -q is-active rsp-stt || { echo "rsp-stt is not running" >&2; exit 1; }
+[ -e $run/record.active ] && { echo "already recording: $(cat $run/record.active)" >&2; exit 1; }
+mkdir -p "$dir"
+while [ "$(du -sm "$dir" | cut -f1)" -gt "$cap" ]; do
+	old=$(ls -1tr "$dir"/*.raw 2>/dev/null | head -1); [ -n "$old" ] || break
+	echo "cap: removing $old"; rm -f "$old" "${old%.raw}.transcript.jsonl"
+done
+echo "$secs $label" > $run/record.req
+i=0; while [ ! -e $run/record.active ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done
+[ -e $run/record.active ] || { echo "the service did not start recording" >&2; exit 1; }
+f=$(cat $run/record.active); echo "recording ${secs}s -> $f"
+echo none | sudo tee "$led/trigger" >/dev/null; echo 1 | sudo tee "$led/brightness" >/dev/null
+while [ -e $run/record.active ]; do sleep 0.5; done
+echo 0 | sudo tee "$led/brightness" >/dev/null
+ls -la "$f"

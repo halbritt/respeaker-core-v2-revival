@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/dts-v1/; /plugin/;
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/rockchip.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+&pinctrl { usb { host_vbus_drv: host-vbus-drv { rockchip,pins = <3 RK_PC4 RK_FUNC_GPIO &pcfg_pull_none>; }; }; };
+&{/} { regulator-vcc-host { compatible = "regulator-fixed"; enable-active-high; gpio = <&gpio3 RK_PC4 GPIO_ACTIVE_HIGH>; pinctrl-names = "default"; pinctrl-0 = <&host_vbus_drv>; regulator-name = "vcc_host"; regulator-always-on; regulator-boot-on; }; };

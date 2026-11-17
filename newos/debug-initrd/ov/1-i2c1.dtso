@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/dts-v1/; /plugin/;
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/rockchip.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+&i2c1 { status = "okay";
+  adc@3b { compatible = "x-powers,ac108-micarray-0"; reg = <0x3b>; #sound-dai-cells = <0>; };
+  adc@35 { compatible = "x-powers,ac108-micarray-1"; reg = <0x35>; }; };

@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/dts-v1/; /plugin/;
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/rockchip.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+&spi0 { pinctrl-names = "default"; pinctrl-0 = <&spi1_clk &spi1_tx &spi1_rx &spi1_cs0 &spi1_cs1>; status = "okay";
+  spidev@0 { compatible = "rohm,dh2228fv"; reg = <0>; spi-max-frequency = <24000000>; }; };

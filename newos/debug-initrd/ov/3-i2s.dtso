@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/dts-v1/; /plugin/;
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/rockchip.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+&pinctrl { i2s1 { i2s1_respeaker: i2s1-respeaker { rockchip,pins = <0 RK_PB0 1 &pcfg_pull_none>, <0 RK_PB1 1 &pcfg_pull_none>, <0 RK_PB4 1 &pcfg_pull_none>, <0 RK_PB5 1 &pcfg_pull_none>, <0 RK_PB6 1 &pcfg_pull_none>, <1 RK_PA2 2 &pcfg_pull_none>, <1 RK_PA4 2 &pcfg_pull_none>, <1 RK_PA5 2 &pcfg_pull_none>; }; }; };
+&i2s1 { #sound-dai-cells = <0>; pinctrl-names = "default"; pinctrl-0 = <&i2s1_respeaker>; status = "okay"; };

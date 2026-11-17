@@ -1,0 +1,24 @@
+--- /home/respeaker/src/odas/src/system/steer2demixing.c	2026-11-16 21:34:20.121611819 +0000
++++ src/system/steer2demixing.c	2026-11-16 23:10:18.675914986 +0000
+@@ -132,10 +132,18 @@
+                     }       
+                     else {
+ 
+-                        demixings->array[iSep][iSampleBC * 2 + 0] = 0.0f;
+-                        demixings->array[iSep][iSampleBC * 2 + 1] = 0.0f;
++                        // Channel masked out: zero its whole column. (The original code wrote one
++                        // element through iSampleBC, which is stale or uninitialized here.)
++                        for (iBin = 0; iBin < obj->halfFrameSize; iBin++) {
+ 
+-                    }             
++                            iSampleBC = iBin * obj->nChannels + iChannel;
++
++                            demixings->array[iSep][iSampleBC * 2 + 0] = 0.0f;
++                            demixings->array[iSep][iSampleBC * 2 + 1] = 0.0f;
++
++                        }
++
++                    }
+ 
+                 }
+ 

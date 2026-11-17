@@ -1,0 +1,460 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Seeed ReSpeaker Core v2.0 (RK3229, RK805 PMIC, AP6212, 2x AC108 mic ADC)
+ *
+ * Written for mainline 6.18 from Seeed's 4.4 vendor tree
+ * (rk3229-respeaker-v2.dts, Copyright (c) 2017 Seeed Technology Co., Ltd).
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+#include "rk3229.dtsi"
+
+/ {
+	model = "Seeed ReSpeaker Core v2.0";
+	compatible = "seeed,respeaker-core-v2", "rockchip,rk3229";
+
+	aliases {
+		mmc0 = &sdmmc;
+		mmc1 = &emmc;
+		mmc2 = &sdio;
+		serial2 = &uart2;
+	};
+
+	chosen {
+		stdout-path = "serial2:115200n8";
+	};
+
+	memory@60000000 {
+		device_type = "memory";
+		reg = <0x60000000 0x40000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/* OP-TEE / trust image loaded by the vendor bootloader */
+		trust_reserved: trust@68400000 {
+			reg = <0x68400000 0xe00000>;
+			no-map;
+		};
+
+		/* kernel log that survives a panic or watchdog reset: /sys/fs/pstore */
+		ramoops@90000000 {
+			compatible = "ramoops";
+			reg = <0x90000000 0x100000>;
+			record-size = <0x20000>;
+			console-size = <0x80000>;
+			ecc-size = <16>;
+		};
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+		autorepeat;
+		pinctrl-names = "default";
+		pinctrl-0 = <&user_key>;
+
+		key-user {
+			label = "GPIO User Key";
+			gpios = <&gpio3 RK_PD1 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_F24>;
+			debounce-interval = <100>;
+			wakeup-source;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		pinctrl-names = "default";
+		pinctrl-0 = <&gpio_leds>;
+
+		led-0 {
+			label = "respeaker2:blue:state1";
+			gpios = <&gpio1 RK_PA7 GPIO_ACTIVE_LOW>;
+			linux,default-trigger = "heartbeat";
+			default-state = "off";
+		};
+
+		led-1 {
+			label = "respeaker2:blue:state2";
+			gpios = <&gpio3 RK_PC5 GPIO_ACTIVE_LOW>;
+			linux,default-trigger = "mmc0";
+			default-state = "off";
+		};
+	};
+
+	sdio_pwrseq: sdio-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		clocks = <&rk805 1>;
+		clock-names = "ext_clock";
+		pinctrl-names = "default";
+		pinctrl-0 = <&wifi_enable_h>;
+		reset-gpios = <&gpio2 RK_PD2 GPIO_ACTIVE_LOW>;
+	};
+
+	sound {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "seeed-8mic-voicecard";
+		simple-audio-card,format = "i2s";
+		simple-audio-card,mclk-fs = <256>;
+
+		simple-audio-card,cpu {
+			sound-dai = <&i2s1>;
+		};
+
+		simple-audio-card,codec {
+			sound-dai = <&ac108_0>;
+		};
+	};
+
+	vcc_sys: regulator-vcc-sys {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_sys";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+	};
+
+	vcc_host: regulator-vcc-host {
+		compatible = "regulator-fixed";
+		enable-active-high;
+		gpio = <&gpio3 RK_PC4 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&host_vbus_drv>;
+		regulator-name = "vcc_host";
+		regulator-always-on;
+		regulator-boot-on;
+		vin-supply = <&vcc_sys>;
+	};
+};
+
+&cpu0 {
+	cpu-supply = <&vdd_arm>;
+};
+
+&cpu1 {
+	cpu-supply = <&vdd_arm>;
+};
+
+&cpu2 {
+	cpu-supply = <&vdd_arm>;
+};
+
+&cpu3 {
+	cpu-supply = <&vdd_arm>;
+};
+
+&emmc {
+	/*
+	 * 37.5 MHz, mainline's limit for this controller. At 50 MHz (what the vendor 4.4
+	 * tree runs, and what high-speed mode asks for when the dtsi allows more, as
+	 * Armbian's does) every data transfer fails here: "switch to bus width 8 failed",
+	 * -110. Measured on the board: 25 and 37.5 MHz read correctly at 4 and 8 bits.
+	 */
+	bus-width = <8>;
+	cap-mmc-highspeed;
+	max-frequency = <37500000>;
+	non-removable;
+	status = "okay";
+};
+
+&i2c0 {
+	status = "okay";
+
+	rk805: pmic@18 {
+		compatible = "rockchip,rk805";
+		reg = <0x18>;
+		interrupt-parent = <&gpio1>;
+		interrupts = <RK_PB4 IRQ_TYPE_LEVEL_LOW>;
+		#clock-cells = <1>;
+		clock-output-names = "xin32k", "rk805-clkout2";
+		gpio-controller;
+		#gpio-cells = <2>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pmic_int_l>;
+		system-power-controller;
+		wakeup-source;
+
+		vcc1-supply = <&vcc_sys>;
+		vcc2-supply = <&vcc_sys>;
+		vcc3-supply = <&vcc_sys>;
+		vcc4-supply = <&vcc_sys>;
+		vcc5-supply = <&vcc_io>;
+		vcc6-supply = <&vcc_sys>;
+
+		regulators {
+			vdd_arm: DCDC_REG1 {
+				regulator-name = "vdd_arm";
+				regulator-min-microvolt = <950000>;
+				regulator-max-microvolt = <1400000>;
+				regulator-ramp-delay = <12500>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			/* 1.1 V on the running vendor kernel; pinned there */
+			vdd_logic: DCDC_REG2 {
+				regulator-name = "vdd_logic";
+				regulator-min-microvolt = <1100000>;
+				regulator-max-microvolt = <1100000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vcc_ddr: DCDC_REG3 {
+				regulator-name = "vcc_ddr";
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vcc_io: DCDC_REG4 {
+				regulator-name = "vcc_io";
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vcc_18: LDO_REG1 {
+				regulator-name = "vcc_18";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vcc_18emmc: LDO_REG2 {
+				regulator-name = "vcc_18emmc";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vdd_10: LDO_REG3 {
+				regulator-name = "vdd_10";
+				regulator-min-microvolt = <1000000>;
+				regulator-max-microvolt = <1000000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+		};
+	};
+};
+
+&i2c1 {
+	status = "okay";
+
+	/* chip 0 is the sound component and drives chip 1 as well */
+	ac108_0: adc@3b {
+		compatible = "x-powers,ac108-micarray-0";
+		reg = <0x3b>;
+		#sound-dai-cells = <0>;
+	};
+
+	ac108_1: adc@35 {
+		compatible = "x-powers,ac108-micarray-1";
+		reg = <0x35>;
+	};
+};
+
+&i2s1 {
+	#sound-dai-cells = <0>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2s1_respeaker>;
+	rockchip,playback-channels = <2>;
+	rockchip,capture-channels = <8>;
+	/*
+	 * The mic chips take LRCK from the TX LRCK pin (GPIO0_B4); the RX LRCK pin
+	 * is not muxed. rockchip_i2s starts TX and RX together, so that pin toggles
+	 * during capture-only use, same as under the vendor kernel (XFER = 0x3).
+	 */
+	status = "okay";
+};
+
+&io_domains {
+	vccio1-supply = <&vcc_io>;
+	vccio2-supply = <&vcc_io>;
+	/* SDIO/wifi pads: GRF_IO_VSEL bit 2 is set (1.8 V) under the vendor kernel */
+	vccio3-supply = <&vcc_18>;
+	vccio4-supply = <&vcc_io>;
+	status = "okay";
+};
+
+&pinctrl {
+	i2s1 {
+		/* as rk322x.dtsi i2s1_bus but without GPIO0_B3 (LRCK_RX), unused here */
+		i2s1_respeaker: i2s1-respeaker {
+			rockchip,pins = <0 RK_PB0 1 &pcfg_pull_none>,
+					<0 RK_PB1 1 &pcfg_pull_none>,
+					<0 RK_PB4 1 &pcfg_pull_none>,
+					<0 RK_PB5 1 &pcfg_pull_none>,
+					<0 RK_PB6 1 &pcfg_pull_none>,
+					<1 RK_PA2 2 &pcfg_pull_none>,
+					<1 RK_PA4 2 &pcfg_pull_none>,
+					<1 RK_PA5 2 &pcfg_pull_none>;
+		};
+	};
+
+	keys {
+		user_key: user-key {
+			rockchip,pins = <3 RK_PD1 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	leds {
+		gpio_leds: gpio-leds {
+			rockchip,pins = <1 RK_PA7 RK_FUNC_GPIO &pcfg_pull_none>,
+					<3 RK_PC5 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	pmic {
+		pmic_int_l: pmic-int-l {
+			rockchip,pins = <1 RK_PB4 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	sdio-pwrseq {
+		wifi_enable_h: wifi-enable-h {
+			rockchip,pins = <2 RK_PD2 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	usb {
+		host_vbus_drv: host-vbus-drv {
+			rockchip,pins = <3 RK_PC4 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	wifi {
+		wifi_host_wake: wifi-host-wake {
+			rockchip,pins = <0 RK_PD4 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+};
+
+&sdio {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	bus-width = <4>;
+	cap-sd-highspeed;
+	cap-sdio-irq;
+	keep-power-in-suspend;
+	max-frequency = <50000000>;
+	mmc-pwrseq = <&sdio_pwrseq>;
+	non-removable;
+	status = "okay";
+
+	brcmf: wifi@1 {
+		compatible = "brcm,bcm4329-fmac";
+		reg = <1>;
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PD4 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "host-wake";
+		pinctrl-names = "default";
+		pinctrl-0 = <&wifi_host_wake>;
+	};
+};
+
+&sdmmc {
+	bus-width = <4>;
+	cap-sd-highspeed;
+	card-detect-delay = <200>;
+	disable-wp;
+	max-frequency = <50000000>;
+	status = "okay";
+};
+
+&spi0 {
+	/* 12x APA102 LED ring on CS0; vendor tree muxes the "spi1" pin group */
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi1_clk &spi1_tx &spi1_rx &spi1_cs0>;
+	status = "okay";
+
+	spidev@0 {
+		compatible = "rohm,dh2228fv";
+		reg = <0>;
+		spi-max-frequency = <24000000>;
+	};
+};
+
+&tsadc {
+	rockchip,hw-tshut-mode = <0>;
+	status = "okay";
+};
+
+/*
+ * No phy-supply on the USB PHY ports: vcc_host is always-on, and a deferred supply makes
+ * rockchip_usb2phy_probe() fail after the OTG port has queued its state-machine work,
+ * which then runs on freed memory (seen as a panic ~4 s into boot on 6.18).
+ */
+&u2phy0 {
+	status = "okay";
+
+	u2phy0_otg: otg-port {
+		status = "okay";
+	};
+
+	u2phy0_host: host-port {
+		status = "okay";
+	};
+};
+
+&u2phy1 {
+	status = "okay";
+
+	u2phy1_otg: otg-port {
+		status = "okay";
+	};
+
+	u2phy1_host: host-port {
+		status = "okay";
+	};
+};
+
+&wdt {
+	status = "okay";
+};
+
+&uart2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart21_xfer>;
+	status = "okay";
+};
+
+&usb_host0_ehci {
+	status = "okay";
+};
+
+&usb_host0_ohci {
+	status = "okay";
+};
+
+&usb_host1_ehci {
+	status = "okay";
+};
+
+&usb_host1_ohci {
+	status = "okay";
+};
+
+&usb_host2_ehci {
+	status = "okay";
+};
+
+&usb_host2_ohci {
+	status = "okay";
+};
+
+/* the micro-USB "OTG" port: device mode, used for the gadget serial console */
+&usb_otg {
+	dr_mode = "peripheral";
+	status = "okay";
+};

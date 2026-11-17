@@ -1,0 +1,28 @@
+#!/bin/sh
+# Bring-up safety net, run as init= before systemd.
+#  - keeps a copy of the kernel log on disk for the first minutes of every boot
+#  - dead-man switch: unless /run/rsp-keep appears within RSP_DEADMAN seconds (default 300),
+#    disarm this card (rename /boot/uEnv.txt) and reset, so the bootloader falls back to eMMC
+D=/boot-debug
+mkdir -p $D
+n=$(ls $D 2>/dev/null | grep -c '^boot-')
+B=$D/boot-$n
+mkdir -p $B
+dmesg > $B/dmesg-preinit.txt 2>&1
+sync
+T=$(sed -n 's/.*rsp_deadman=\([0-9]*\).*/\1/p' /proc/cmdline); T=${T:-300}
+( i=0
+  while [ $i -lt 900 ]; do
+    dmesg > $B/dmesg.new 2>&1 && mv $B/dmesg.new $B/dmesg.txt
+    echo "$i $(cat /proc/uptime 2>/dev/null)" > $B/alive.txt
+    [ $((i % 10)) -eq 0 ] && sync
+    if [ "$T" -gt 0 ] && [ $i -ge "$T" ] && [ ! -e /run/rsp-keep ] && [ -e /boot/uEnv.txt ]; then
+      echo "deadman fired at $i" >> $B/alive.txt
+      journalctl -b --no-pager > $B/journal.txt 2>&1
+      mv /boot/uEnv.txt /boot/uEnv.txt.done; sync
+      echo rsp-clean-reboot > /dev/kmsg; sleep 1
+      echo b > /proc/sysrq-trigger
+    fi
+    i=$((i+1)); sleep 1
+  done ) </dev/null >/dev/null 2>&1 &
+exec /sbin/init "$@"

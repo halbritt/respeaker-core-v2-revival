@@ -1,0 +1,92 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* Bring-up minimum for the ReSpeaker Core v2: console, LEDs, SD card, USB device port.
+ * No PMIC, cpufreq, tsadc or io-domains: rails stay as the bootloader left them. */
+/dts-v1/;
+#include <dt-bindings/gpio/gpio.h>
+#include "rk3229.dtsi"
+
+/ {
+	model = "Seeed ReSpeaker Core v2.0 (bring-up minimum)";
+	compatible = "seeed,respeaker-core-v2", "rockchip,rk3229";
+
+	aliases {
+		mmc0 = &sdmmc;
+		serial2 = &uart2;
+	};
+
+	chosen {
+		stdout-path = "serial2:115200n8";
+	};
+
+	memory@60000000 {
+		device_type = "memory";
+		reg = <0x60000000 0x40000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		trust@68400000 {
+			reg = <0x68400000 0xe00000>;
+			no-map;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		pinctrl-names = "default";
+		pinctrl-0 = <&gpio_leds>;
+
+		led-0 {
+			label = "respeaker2:blue:state1";
+			gpios = <&gpio1 RK_PA7 GPIO_ACTIVE_LOW>;
+			linux,default-trigger = "heartbeat";
+			default-state = "off";
+		};
+
+		led-1 {
+			label = "respeaker2:blue:state2";
+			gpios = <&gpio3 RK_PC5 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+	};
+};
+
+&pinctrl {
+	leds {
+		gpio_leds: gpio-leds {
+			rockchip,pins = <1 RK_PA7 RK_FUNC_GPIO &pcfg_pull_none>,
+					<3 RK_PC5 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+};
+
+&sdmmc {
+	bus-width = <4>;
+	cap-sd-highspeed;
+	card-detect-delay = <200>;
+	disable-wp;
+	max-frequency = <50000000>;
+	status = "okay";
+};
+
+&u2phy0 {
+	status = "okay";
+
+	otg-port {
+		status = "okay";
+	};
+};
+
+&uart2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart21_xfer>;
+	status = "okay";
+};
+
+&usb_otg {
+	dr_mode = "peripheral";
+	status = "okay";
+};

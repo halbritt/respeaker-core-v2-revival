@@ -1,0 +1,17 @@
+[Unit]
+Description=ReSpeaker speech-to-text client (mic array -> ODAS -> whisper server)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+User=respeaker
+EnvironmentFile=/etc/default/rsp-stt
+# site-specific overrides (server address, tokens); not part of the repository
+EnvironmentFile=-/etc/default/rsp-stt.local
+ExecStart=/usr/bin/python3 -u /opt/rsp-stt/rsp-stt.py
+RuntimeDirectory=rsp-stt
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

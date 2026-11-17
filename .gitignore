@@ -1,0 +1,21 @@
+# secrets and machine-local state
+board-credentials.txt
+# downloaded or generated artefacts (see README for how to obtain them)
+images/
+tools/rkbin/
+newos/armbian-build/
+newos/baseline/
+newos/out/
+newos/sdlog/
+newos/*.log
+newos/seeed-voicecard/
+newos/debug-initrd/logs/
+newos/debug-initrd/*.img
+newos/debug-initrd/*.dtb
+newos/debug-initrd/ov/*.dtbo
+newos/debug-initrd/busybox-armhf
+newos/cross/src/
+newos/cross/out/
+__pycache__/
+tools/rkdeveloptool/
+local/

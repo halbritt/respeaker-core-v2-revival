@@ -1,0 +1,15 @@
+#!/bin/sh
+# rsp-replay <recording.raw> [odaslive binary] - run a raw recording (rsp-record format)
+# through ODAS and Whisper offline, without touching the live service or the sound card.
+# Writes <recording>.transcript.jsonl next to the recording ("t" = seconds into the take).
+# Settings come from /etc/default/rsp-stt; override any STT_* variable in the environment.
+rec=$(readlink -f "$1"); out=${rec%.raw}.transcript.jsonl; rm -f "$out"
+keep=$(env | grep '^STT_' || true)
+set -a; . /etc/default/rsp-stt; [ -e /etc/default/rsp-stt.local ] && . /etc/default/rsp-stt.local; set +a
+for kv in $keep; do export "$kv"; done
+run=$(mktemp -d /tmp/rsp-replay-XXXXXX)
+[ -n "$2" ] && export STT_ODAS_BIN="$2"
+export STT_SOURCE=odas STT_ODAS_INPUT="$rec" STT_RUN_DIR="$run" STT_LOG="$out"
+export STT_ODAS_TRACK_PORT=9100 STT_ODAS_AUDIO_PORT=9102 STT_ODAS_SEP_PORT=9103
+nice python3 -u "${RSP_STT:-/opt/rsp-stt/rsp-stt.py}" 2>&1 | grep -v '^\[\|^ '
+rm -rf "$run"; touch "$out"; echo "wrote $out ($(wc -l < "$out") transcripts)"
