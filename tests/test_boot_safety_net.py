@@ -539,6 +539,8 @@ def test_f6_t2_debug_initrd_without_rspboot_always_hands_back_to_emmc(tmp_path: 
     (root / "proc" / "cmdline").write_text(f"rootwait {profile_word}\n", encoding="utf-8")
     (root / "dev" / "mmcblk0p2").write_text("", encoding="utf-8")
     (root / "sd" / "boot").mkdir(parents=True)
+    (root / "sd" / "sbin").mkdir(parents=True)
+    (root / "sd" / "sbin" / "rsp-preinit").write_text("#!/bin/sh\n", encoding="utf-8")     # marks the SD root
     (root / "sd" / "etc").mkdir(parents=True)
     (root / "sd" / "etc" / "rsp-safety").write_text("release\n", encoding="utf-8")
     (root / "sd" / "boot" / "uEnv.txt").write_text("dtb=rk3229-respeaker-v2.dtb\n", encoding="utf-8")
