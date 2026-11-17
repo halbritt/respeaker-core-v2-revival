@@ -1,0 +1,8 @@
+[tasks.test]
+description = "Host verification suite (privacy, syntax, board runtime, patches, boot safety net)"
+run = '''sh -eu -c '
+if [ "$#" -gt 0 ]; then
+  exec mise run host:exec --timeout 5m --weight 1 -- python3 -B -m pytest -q -p no:cacheprovider "$@"
+fi
+exec mise run host:exec --timeout 5m --weight 1 -- python3 -B -m pytest -q -p no:cacheprovider tests
+' sh'''
