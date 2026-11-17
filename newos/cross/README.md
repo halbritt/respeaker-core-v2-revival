@@ -11,6 +11,7 @@ Cross-compiles [introlab/odas](https://github.com/introlab/odas) (pinned base co
   - `0001-steer2demixing-ds-zero-masked-channel-column.patch`: Zero full frequency column for masked channels (`RESPEAKER-4`).
   - `0002-src-hops-recover-from-alsa-xruns.patch`: ALSA xrun/suspend/EINTR recovery via `snd_pcm_recover()` + short-read accumulation (`RESPEAKER-5`).
   - `0003`-`0008`: Fixes for 6 latent ODAS bugs (`transcendental.c`, `track2gain.c`, `mod_ssl.c`, `env2env.c`, `fft.c`, `snk_tracks.c`; `RESPEAKER-6`).
+  Only `0001` runs on the board so far; `0002` is unused there (ODAS reads from a FIFO); `0003`-`0008` were replayed on recorded takes. See the table in the top-level README.
 - `upstream/`: Archival upstream PR notes (`RESPEAKER-4-steer2demixing-pr.md`).
 
 ## Usage

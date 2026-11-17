@@ -32,6 +32,7 @@ Status: works on one board. Not yet rebuilt from scratch end to end; see "Known 
 | `newos/cross/` | Docker cross toolchain (Debian 13 armhf) and the ODAS build with patches |
 | `newos/vendor-4.4/` | Vendor kernel config and Seeed's kernel patches, for reference |
 | `tools/bin/rsp-serial` | Run a command on the vendor image's USB serial console |
+| `tests/` | Host test suite: `mise run test`, or `python3 -m pytest tests` (needs pytest and numpy; some tests skip without `dtc`, a static busybox or the upstream sources) |
 
 Not in the repository (downloaded or generated): the Armbian build tree, Seeed's image, the
 Rockchip loader tools, kernel/rootfs output, a static busybox for the initramfs.
@@ -119,10 +120,14 @@ in the room is still transcribed first.
 
 ## ODAS
 
-Built from introlab/odas commit 004cb82 plus `newos/cross/patches/`:
+Built from introlab/odas commit 004cb82 plus `newos/cross/patches/`, which
+`newos/cross/build-odas.sh` applies in order:
 
-- `0001`: `steer2demixing_ds_process` wrote through a stale index when every channel was
-  masked for a track (a source near the board's plane), which crashed `odaslive`.
+| Patch | What it fixes | State |
+|---|---|---|
+| `0001` | `steer2demixing_ds_process` wrote through a stale index when every channel was masked for a track (a source near the board's plane), which crashed `odaslive`. Same fix as upstream PR #309. | Running on the board |
+| `0002` | ALSA capture: short reads counted as full, and an overrun ended the stream. | Reviewed only: `rsp-stt` feeds ODAS from a FIFO, so this path is not used here |
+| `0003`-`0008` | Undefined float-to-index conversions, a stale index in the scan, an uninitialised accumulator, a process-wide FFTW cleanup, overlapping `sprintf`. | Built and replayed: same utterance counts on five recorded takes; not yet the build on the board |
 
 `board/odas-respeaker-core-v2.cfg` also sets each mic's angle to 180 degrees so low sources
 are not masked. Build with `newos/cross/cross.sh ./build-odas.sh` and install the resulting
@@ -147,8 +152,9 @@ Options:
 - `--armed`: writes `/boot/uEnv.txt` so the board boots the card on reset (default writes
   `/boot/uEnv.txt.disabled`).
 - `--safety=bringup|release` (or `--bringup` / `--release`, or `SAFETY_PROFILE` env; default
-  `bringup`): selects the boot safety net profile written to `/etc/rsp-safety` and
-  `uEnv.txt`.
+  `bringup`): selects the boot safety net profile, written to `/etc/rsp-safety`; `release`
+  is also added to the kernel command line in `uEnv.txt`. See the warning below before
+  choosing `release`.
 
 Two things that cost the most time, for anyone porting to a similar board:
 
@@ -160,32 +166,33 @@ Two things that cost the most time, for anyone porting to a similar board:
 
 ### Boot safety net
 
-Developed without a serial console, the boot safety net supports two profiles (resolved in
-order: kernel cmdline `rsp_safety=bringup|release` > `/etc/rsp-safety` > default `bringup`):
+The board was brought up without a serial console, so a failed boot has to recover by
+itself. Two profiles exist, chosen by `rsp_safety=bringup|release` on the kernel command
+line, else the first line of `/etc/rsp-safety`, else `bringup`. An unrecognised value on
+the command line means `bringup`.
 
-- **Bring-up mode (`--bringup`, default)**: Protects headless kernel/DTB bring-up.
-  The initramfs (`newos/debug-initrd/init`) loads `dw_wdt.ko`, arms the hardware watchdog,
-  reads `/sys/fs/pstore`, and saves every boot's logs to `/boot-debug/`. If the previous
-  boot panicked or hung (unless `rspkeep` is on the kernel command line), it renames
-  `uEnv.txt` to `uEnv.txt.done` and resets to the eMMC system. `/sbin/rsp-preinit` then
-  logs early `dmesg` and runs a 300 s dead-man switch (`rsp_deadman=`) waiting for
-  `rsp-keep.service` (wifi IPv4 address + active `ssh`); if it times out, it saves the
-  journal, renames `uEnv.txt`, and resets to eMMC.
-- **Release mode (`--release` / `--safety=release`)**: Avoids permanent self-fallback to
-  eMMC (or unbootable eMMC installs) after a sudden power loss, brownout, or >300 s wifi
-  outage, and eliminates the 900 s per-boot `dmesg`/`sync` loop. The unified initramfs still
-  clears clean `/sys/fs/pstore/*`, captures crash logs to `/boot-debug/` only when a
-  `pstore` crash/unclean marker is present (preserving `uEnv.txt` and rotating `/boot-debug/`
-  with monotonic IDs, keeping 20 normal and 5 crash directories by default via
-  `rsp_debug_keep`), skips initramfs `g_serial.ko` (overridable via `rsp_gserial=1`), and
-  loads `dw_wdt.ko` early. `/sbin/rsp-preinit` skips the dead-man switch and polling loop and
-  hands `/dev/watchdog` off cleanly to `systemd` (`RuntimeWatchdogSec=15s`,
-  `RebootWatchdogSec=2min`, within `dw_wdt`'s ~21.5 s max hardware period).
-- `newos/debug-initrd/` also contains the staged device-tree test runner (`run-stage.sh`),
-  a USB-serial shell for the initramfs, and live device-tree overlays used to bisect boot
-  crashes. When running `newos/debug-initrd/run-stage.sh` against a `--release`-built SD
-  card, pass `rsp_safety=bringup` in `run-stage.sh`'s `[extra cmdline]` argument so the
-  debug stage runner disarms `uEnv.txt` and falls back to eMMC once `stages` completes.
+- **Bring-up (default).** This is the profile the board runs and the only one that has
+  booted on hardware.
+  - The initramfs (`newos/debug-initrd/init`) mounts the card, reads `/sys/fs/pstore`,
+    then loads `dw_wdt.ko` and arms the hardware watchdog. If the previous boot panicked
+    or hung, it saves that kernel log to `/boot-debug/`, renames `uEnv.txt` so the
+    bootloader falls back to the eMMC system, and resets. `rspkeep` on the command line
+    suppresses the fallback.
+  - `/sbin/rsp-preinit` runs a dead-man switch: if `rsp-keep.service` has not seen a wifi
+    address and a running sshd within 300 s (`rsp_deadman=`), it saves the journal,
+    renames `uEnv.txt` and resets.
+- **Release (`--release`).** For a card that should keep booting itself after a power cut
+  or a long wifi outage. **It has no automatic fallback**: a kernel that panics or hangs
+  on every boot will loop, and a board whose wifi never comes up stays unreachable until
+  the card is pulled. Do not use it on a board without a serial console or other way in.
+  It has not been booted on hardware. Crash logs are still saved (the five most recent are
+  kept), the dead-man switch is off, the initramfs does not load the USB serial gadget
+  (`rsp_gserial=1` turns it back on), and the watchdog is handed from the initramfs to
+  systemd (`RuntimeWatchdogSec=15s`) by stopping the feeder process.
+- `newos/debug-initrd/` also has the staged device-tree test runner (`run-stage.sh`), a
+  USB-serial shell for the initramfs, and live device-tree overlays used to bisect the boot
+  crash. A boot without `rspboot` on the command line is a staged test: when no stage is
+  left the initramfs disarms the card and returns to the eMMC system, in either profile.
 
 ## Known gaps
 
@@ -195,6 +202,10 @@ order: kernel cmdline `rsp_safety=bringup|release` > `/etc/rsp-safety` > default
   but installing to it is not scripted.
 - Playback (the on-chip DAC), echo cancellation, a local wake-word model and the LED ring
   are not set up. The loopback channels are captured but unused.
+- The USB serial console works in the initramfs and under the vendor image, but not once the
+  new system is fully up.
+- The kernel's USB PHY use-after-free (see above) is worked around in the device tree; a fix
+  for the driver is in `newos/port/patches/` and has not been sent upstream.
 - Mic gain is 24 dB: at 28 dB a talker close to the board peaked at -0.8 dBFS. Not calibrated further.
 
 ## Licences
@@ -207,5 +218,5 @@ MIT (`LICENSE`) for everything except the kernel-derived files:
 - Device trees and overlays (`*.dts`, `*.dtsi`, `*.dtso`): GPL-2.0-or-later or MIT at your
   option, as in the kernel sources they derive from.
 
-Files that carry their own licence notice or SPDX tag are under that licence. The ODAS patch
-in `newos/cross/patches/` is MIT, as ODAS is.
+Files that carry their own licence notice or SPDX tag are under that licence. The ODAS patches
+in `newos/cross/patches/` are MIT, as ODAS is.

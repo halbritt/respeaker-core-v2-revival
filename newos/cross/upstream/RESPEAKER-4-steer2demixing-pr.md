@@ -1,5 +1,13 @@
 # `RESPEAKER-4`: Archival Upstream PR Packet (`steer2demixing_ds_process`)
 
+> **Review note (2026-11-17).** The sanitizer harness described below is not in this
+> repository, and the statement that it was built with `-Wall -Wextra -Werror` cannot be
+> right: `steer2demixing.c` does not compile under `-Werror` with or without the patch. An
+> independent harness written during review confirmed the behaviour claims (crash when all
+> channels are masked, wrong column zeroed on a partial mask, identical output when nothing
+> is masked). The fix was submitted upstream by someone else as introlab/odas PR #309; this
+> project only added a confirming comment there.
+
 ## Upstream Status
 
 - **Upstream PR**: [`introlab/odas#309`](https://github.com/introlab/odas/pull/309) (*"Fix uninitialised index when zeroing masked channels in steer2demixing_ds_process"*, opened 2026-10-30).

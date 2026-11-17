@@ -1,5 +1,15 @@
 # RESPEAKER-8 Upstream Submission Packet: `phy: rockchip: inno-usb2` Probe-Defer & Unbind UAF
 
+> **Review note (2026-11-17).** Status of this patch: applies to mainline 7.4-rc3 and to
+> v6.18.63, compiles with W=1, passes checkpatch apart from the missing Signed-off-by. It has
+> **not** been booted on hardware, and the userspace sanitizer harness mentioned below is not
+> in this repository. A smaller variant of the same fix (the three works set up with
+> `devm_delayed_work_autocancel()`) was boot-tested on the board: without it a device tree
+> with `phy-supply` on the host ports oopses about 4 s into every boot; with it both PHYs
+> defer once and then probe, with no oops. Before sending either, keep a single Fixes tag
+> (`8dc60f8da22f`), add the oops trace, and disclose the use of an AI coding assistant as
+> the kernel's process documentation asks. Nothing has been sent upstream.
+
 > **OWNER GATE:** This packet is prepared for human review and submission. Per Linux kernel DCO rules and project policy, **do not send emails or push upstream automatically** — the human owner must add their real-name `Signed-off-by:` and run `git send-email`.
 
 ## 1. Patch Artifact & Target Trees
