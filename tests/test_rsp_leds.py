@@ -148,8 +148,30 @@ def test_ring_goes_dark_when_the_sound_turns_out_not_to_be_an_utterance(tmp_path
         ring.close()
 
 
-def test_speech_without_a_known_direction_lights_the_whole_ring_dimly(tmp_path: Path) -> None:
-    ring = Ring(tmp_path, [("speech_start", {})])
+def test_ring_stays_dark_until_the_direction_is_known_then_points(tmp_path: Path) -> None:
+    """The tracker usually finds the talker a moment after the level rises; noise it never finds."""
+    ring = Ring(tmp_path, [("speech_start", {}), 0.4, ("speech_dir", {"az": 240, "el": 30, "src": 1})])
+    try:
+        frame = ring.wait_for(lambda f: lit(f))
+        assert brightest(frame) == 3 and lit(frame) <= {2, 3, 4}
+        assert all(len(lit(f)) <= 3 for f in ring.frames()), "the whole ring was lit before the direction was known"
+    finally:
+        ring.close()
+
+
+def test_pointer_follows_a_talker_who_moves_while_speaking(tmp_path: Path) -> None:
+    ring = Ring(tmp_path, [("speech_start", {"az": 240}), 0.3, ("speech_dir", {"az": 90})])
+    try:
+        ring.wait_for(lambda f: lit(f) and brightest(f) == 3)
+        moved = ring.wait_for(lambda f: lit(f) and brightest(f) == 8)
+        assert lit(moved) <= {7, 8, 9}
+    finally:
+        ring.close()
+
+
+def test_utterance_sent_without_a_direction_lights_the_whole_ring_dimly(tmp_path: Path) -> None:
+    """Without ODAS (plain microphone mode) there is never a direction to point at."""
+    ring = Ring(tmp_path, [("speech_start", {}), ("speech_end", {"sent": True})])
     try:
         frame = ring.wait_for(lambda f: lit(f))
         assert lit(frame) == set(range(N))

@@ -40,6 +40,7 @@ MIX       = env("STT_CHANNEL", "sum")          # "sum" = average of the mics, or
 MICS      = env("STT_MICS", 6, int)            # channels 0..MICS-1 are microphones
 RATE      = 16000
 FRAME_MS  = 30
+DIR_STEP  = 15         # degrees a talker must move before speech_dir is published again
 LANGUAGE  = env("STT_LANGUAGE", "en")
 START_RATIO = env("STT_START_RATIO", 3.0, float)   # speech = rms > noise floor * ratio
 MIN_RMS   = env("STT_MIN_RMS", 150, int)           # ...and above this absolute level
@@ -86,7 +87,7 @@ ODAS_INPUT = env("STT_ODAS_INPUT", "")
 RUN_DIR   = env("STT_RUN_DIR", "/run/rsp-stt")           # FIFO, generated cfg, record requests
 REC_DIR   = env("STT_REC_DIR", os.path.expanduser("~/recordings"))
 # Event stream for other programs (an agent, a display): "host:port" to serve
-#   GET /events   Server-Sent Events: speech_start, speech_end, utterance (JSON data)
+#   GET /events   Server-Sent Events: speech_start, speech_dir, speech_end, utterance (JSON data)
 #   GET /recent   the last utterances as a JSON array
 # Off when empty. Bind to 127.0.0.1 unless the LAN should be able to read what is said.
 # Speech gate: an utterance is sent to the server only if the Silero VAD model hears at least
@@ -388,6 +389,7 @@ class Segmenter:
         self.speaking, self.utt, self.silence_ms, self.n = False, [], 0, 0
         self.seen = []                                # per-utterance snapshots from meta()
         self.levels = []                              # per-frame rms of the utterance
+        self.shown = None                             # direction last published for it
 
     def feed(self, mono, payload=None):
         """mono drives the VAD; payload (default: mono) is what gets sent."""
@@ -409,8 +411,9 @@ class Segmenter:
                 self.utt = [p for p, _ in self.pre]
                 self.levels = [r for _, r in self.pre]     # per-frame rms, aligned with utt
                 self.recent.clear(); self.seen = []
-                publish("speech_start", dict((self.meta and self.meta()) or {},
-                                             ts=time.strftime("%Y-%m-%dT%H:%M:%S%z")))
+                m = (self.meta and self.meta()) or {}
+                self.shown = m.get("az")               # direction last published, if any
+                publish("speech_start", dict(m, ts=time.strftime("%Y-%m-%dT%H:%M:%S%z")))
             return
         self.utt.append(payload)
         self.levels.append(rms)
@@ -419,6 +422,11 @@ class Segmenter:
             m = self.meta()
             if m:
                 self.seen.append(m)
+                # tell listeners where the talker is once known, and again when they have moved
+                if self.shown is None or abs((m["az"] - self.shown + 180) % 360 - 180) >= DIR_STEP:
+                    self.shown = m["az"]
+                    publish("speech_dir", {"az": int(round(m["az"])) % 360, "el": int(round(m["el"])),
+                                           "src": m["src"], "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
         too_long = len(self.utt) * FRAME_MS >= MAX_S * 1000
         long_enough = len(self.utt) * FRAME_MS >= SOFT_S * 1000
         soft_end = long_enough and self.silence_ms >= SOFT_SIL_MS

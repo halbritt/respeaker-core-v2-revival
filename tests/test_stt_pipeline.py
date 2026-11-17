@@ -287,3 +287,48 @@ def test_dominant_mode_slot_that_is_not_clearly_louder_does_not_take_over(
     voiced = [m for m in marks if m]
     assert voiced == [SLOT0_MARK] * 30, marks
     assert len(rows) == 1 and rows[0]["az"] == 0
+
+
+# --- direction while speaking ---
+
+
+def _events_while_feeding(stt, directions: list) -> list[dict]:
+    """Feed one loud 30 ms frame per entry of `directions` (the tracker's answer at that frame)."""
+    import queue
+
+    q: queue.Queue = queue.Queue()
+    stt.SUBSCRIBERS.append(q)
+    now = {"m": None}
+    seg = stt.Segmenter(meta=lambda: now["m"], name="t")
+    try:
+        for d in directions:
+            now["m"] = d
+            seg.feed(_pcm(0.03, amp=6000))
+    finally:
+        stt.SUBSCRIBERS.remove(q)
+    out = []
+    while not q.empty():
+        out.append(q.get())
+    return out
+
+
+def test_direction_found_after_speech_started_is_published_while_still_speaking(rsp_stt_loader) -> None:
+    """ODAS tracks a talker a moment after the level rises, so speech_start often has no direction."""
+    stt = rsp_stt_loader()
+    there = {"src": 2, "az": 120.0, "el": 30.0}
+    events = _events_while_feeding(stt, [None] * 20 + [there] * 40)
+    kinds = [e["event"] for e in events]
+    assert kinds[0] == "speech_start" and "az" not in events[0]
+    dirs = [e for e in events if e["event"] == "speech_dir"]
+    assert len(dirs) == 1, "one event per direction, not one per frame: %s" % kinds
+    assert dirs[0]["az"] == 120 and dirs[0]["src"] == 2
+
+
+def test_direction_is_published_again_only_when_the_talker_has_moved(rsp_stt_loader) -> None:
+    stt = rsp_stt_loader()
+    a = {"src": 2, "az": 350.0, "el": 30.0}
+    wobble = {"src": 2, "az": 4.0, "el": 30.0}            # 14 degrees on, across north
+    b = {"src": 2, "az": 60.0, "el": 30.0}
+    events = _events_while_feeding(stt, [a] * 30 + [wobble] * 30 + [b] * 30)
+    assert events[0]["event"] == "speech_start" and events[0]["az"] == 350.0
+    assert [e["az"] for e in events if e["event"] == "speech_dir"] == [60]

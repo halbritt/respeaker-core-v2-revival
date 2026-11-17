@@ -94,7 +94,8 @@ the environment overrides them, so one take can be compared across settings or O
 ### Connecting an agent
 
 Set `STT_HTTP=127.0.0.1:8911` (see `board/rsp-stt.env`). `GET /events` is a Server-Sent Events
-stream of `speech_start`, `speech_end` and `utterance`; `GET /recent` returns the last
+stream of `speech_start`, `speech_dir` (the talker's direction, once known and when it moves),
+`speech_end` and `utterance`; `GET /recent` returns the last
 utterances. It carries what is said in the room, so it binds to localhost by default; forward
 it with `ssh -L 8911:127.0.0.1:8911 <board>`, or bind it wider and set `STT_HTTP_TOKEN`.
 
@@ -125,7 +126,7 @@ LEDs over SPI:
 
 | State | Ring |
 |---|---|
-| Someone is speaking | Blue pointer towards the talker (whole ring dim if the direction is unknown) |
+| Someone is speaking | Blue pointer towards the talker, as soon as the direction is known; it follows them if they move |
 | Utterance being transcribed | Amber pointer, for at most 8 s |
 | Transcript arrived | Green pointer for 0.6 s |
 | Otherwise | Dark, also when the speech service is down |

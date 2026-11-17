@@ -6,8 +6,8 @@ ReSpeaker Core v2 over SPI. Standard library only.
 
   rsp-leds                                   # /dev/spidev0.0, events from 127.0.0.1:8911
 
-  speaking        blue pointer towards the talker (whole ring dim if the direction is unknown)
-  transcribing    amber pointer, for at most --wait seconds
+  speaking        blue pointer towards the talker, from the moment the direction is known
+  transcribing    amber pointer (whole ring dim without a direction), for at most --wait seconds
   transcript in   green pointer for --flash seconds
   otherwise       dark, also when the event stream is lost or the program stops
 
@@ -107,7 +107,11 @@ def main():
                 ring.show(OFF); dark_at = None
                 continue
             if kind == "speech_start":
-                ring.show(pointer(d["az"], LISTENING) if "az" in d else [DIM] * N)
+                # no direction yet: stay dark, most such sounds are noise the tracker never finds
+                ring.show(pointer(d["az"], LISTENING) if "az" in d else OFF)
+                dark_at = None
+            elif kind == "speech_dir":
+                ring.show(pointer(d["az"], LISTENING))
                 dark_at = None
             elif kind == "speech_end":
                 if d.get("sent"):
