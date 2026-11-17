@@ -1,0 +1,118 @@
+From b2f9276975c66b3b695c32567ce5279ce34dc918 Mon Sep 17 00:00:00 2001
+From: halbritt <10265718+halbritt@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 23:47:23 -0800
+Subject: [PATCH] phy: rockchip: inno-usb2: disable work on probe failure and
+ removal
+
+In rockchip_usb2phy_probe(), child port nodes are initialized in a
+loop.  For an OTG port (when dr_mode is not HOST or UNKNOWN),
+rockchip_usb2phy_otg_port_init() initializes chg_work and otg_sm_work,
+registers port IRQs and an extcon notifier, and (when no external
+"extcon" DT property is present) calls extcon_set_state_sync(), which
+synchronously invokes rockchip_otg_event() and schedules otg_sm_work
+after OTG_SCHEDULE_DELAY (2 * HZ).
+
+If a subsequent child port's devm_phy_create() returns -EPROBE_DEFER
+(for example, host-port waiting on a deferred phy-supply regulator) or
+another probe error occurs, devres_release_all() frees rport->phy and
+rphy without stopping the pending delayed work, causing a use-after-free
+when the work runs.  In addition, rockchip_usb2phy_driver has no .remove
+callback, so unbinding the driver leaves any armed sm_work, otg_sm_work,
+or chg_work running after rphy has been freed.
+
+Register per-port devm_add_action_or_reset() cleanup callbacks calling
+disable_delayed_work_sync() immediately after INIT_DELAYED_WORK() (after
+the USB_DR_MODE_HOST / USB_DR_MODE_UNKNOWN early return for the OTG port)
+and before rockchip_usb2phy_port_irq_init() and
+devm_extcon_register_notifier().
+
+Using disable_delayed_work_sync() rather than plain
+cancel_delayed_work_sync() prevents otg_sm_work and chg_work from
+cross-scheduling each other during teardown and blocks re-arming from
+concurrent extcon or IRQ callbacks.  Registering the devm actions
+between devm_phy_create() and IRQ/extcon registration ensures LIFO
+devres teardown unregisters the extcon notifier and frees all IRQs
+first, disables and drains all delayed work while rport->phy and rphy
+are still valid, and frees phy and rphy last.
+
+rockchip_usb2phy_exit() retains cancel_delayed_work_sync() so normal
+phy_init() -> phy_exit() -> phy_init() cycles continue to work.
+
+Fixes: 0e08d2a727e6 ("phy: rockchip-inno-usb2: add a new driver for Rockchip usb2phy")
+Fixes: 98898f3bc83c ("phy: rockchip-inno-usb2: support otg-port for rk3399")
+Fixes: 8dc60f8da22f ("phy: rockchip-inno-usb2: Sync initial otg state")
+Cc: stable@vger.kernel.org
+---
+ drivers/phy/rockchip/phy-rockchip-inno-usb2.c | 28 +++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/drivers/phy/rockchip/phy-rockchip-inno-usb2.c b/drivers/phy/rockchip/phy-rockchip-inno-usb2.c
+index 848c07ccb..f8f189ea5 100644
+--- a/drivers/phy/rockchip/phy-rockchip-inno-usb2.c
++++ b/drivers/phy/rockchip/phy-rockchip-inno-usb2.c
+@@ -26,6 +26,7 @@
+ #include <linux/mfd/syscon.h>
+ #include <linux/usb/of.h>
+ #include <linux/usb/otg.h>
++#include <linux/workqueue.h>
+ 
+ #define BIT_WRITEABLE_SHIFT	16
+ #define SCHEDULE_DELAY		(60 * HZ)
+@@ -1254,6 +1255,13 @@ static int rockchip_usb2phy_port_irq_init(struct rockchip_usb2phy *rphy,
+ 	return 0;
+ }
+ 
++static void rockchip_usb2phy_host_port_work_disable(void *data)
++{
++	struct rockchip_usb2phy_port *rport = data;
++
++	disable_delayed_work_sync(&rport->sm_work);
++}
++
+ static int rockchip_usb2phy_host_port_init(struct rockchip_usb2phy *rphy,
+ 					   struct rockchip_usb2phy_port *rport,
+ 					   struct device_node *child_np)
+@@ -1267,6 +1275,12 @@ static int rockchip_usb2phy_host_port_init(struct rockchip_usb2phy *rphy,
+ 	mutex_init(&rport->mutex);
+ 	INIT_DELAYED_WORK(&rport->sm_work, rockchip_usb2phy_sm_work);
+ 
++	ret = devm_add_action_or_reset(rphy->dev,
++				       rockchip_usb2phy_host_port_work_disable,
++				       rport);
++	if (ret)
++		return ret;
++
+ 	ret = rockchip_usb2phy_port_irq_init(rphy, rport, child_np);
+ 	if (ret) {
+ 		dev_err(rphy->dev, "failed to setup host irq\n");
+@@ -1287,6 +1301,14 @@ static int rockchip_otg_event(struct notifier_block *nb,
+ 	return NOTIFY_DONE;
+ }
+ 
++static void rockchip_usb2phy_otg_port_work_disable(void *data)
++{
++	struct rockchip_usb2phy_port *rport = data;
++
++	disable_delayed_work_sync(&rport->otg_sm_work);
++	disable_delayed_work_sync(&rport->chg_work);
++}
++
+ static int rockchip_usb2phy_otg_port_init(struct rockchip_usb2phy *rphy,
+ 					  struct rockchip_usb2phy_port *rport,
+ 					  struct device_node *child_np)
+@@ -1318,6 +1340,12 @@ static int rockchip_usb2phy_otg_port_init(struct rockchip_usb2phy *rphy,
+ 	INIT_DELAYED_WORK(&rport->chg_work, rockchip_chg_detect_work);
+ 	INIT_DELAYED_WORK(&rport->otg_sm_work, rockchip_usb2phy_otg_sm_work);
+ 
++	ret = devm_add_action_or_reset(rphy->dev,
++				       rockchip_usb2phy_otg_port_work_disable,
++				       rport);
++	if (ret)
++		goto out;
++
+ 	ret = rockchip_usb2phy_port_irq_init(rphy, rport, child_np);
+ 	if (ret) {
+ 		dev_err(rphy->dev, "failed to init irq for host port\n");
+-- 
+2.53.0
+
