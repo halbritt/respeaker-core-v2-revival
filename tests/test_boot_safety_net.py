@@ -543,8 +543,22 @@ def test_f6_t2_debug_initrd_without_rspboot_always_hands_back_to_emmc(tmp_path: 
     (root / "sd" / "etc" / "rsp-safety").write_text("release\n", encoding="utf-8")
     (root / "sd" / "boot" / "uEnv.txt").write_text("dtb=rk3229-respeaker-v2.dtb\n", encoding="utf-8")
 
-    res = _run_chroot(root, ["/init"], timeout=60)
-    assert res.returncode == 0, res.stderr
+    # init leaves console loops in the background; they would hold a capture pipe open, so
+    # run without pipes in a session of its own and judge by what is left on the "card".
+    proc = subprocess.Popen(
+        ["unshare", "-Ur", "chroot", str(root), "/init"],
+        env={"PATH": "/bin:/sbin"},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        assert proc.wait(timeout=60) == 0
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     assert (root / "reboot.log").is_file(), "init did not reboot"
     assert not (root / "sd" / "boot" / "uEnv.txt").exists(), "card still armed: the next boot comes straight back here"
     assert (root / "sd" / "boot" / "uEnv.txt.done").is_file()
