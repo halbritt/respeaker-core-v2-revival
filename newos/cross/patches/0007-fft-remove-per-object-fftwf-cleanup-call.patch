@@ -1,0 +1,26 @@
+From 40a04cc53bea4da72c0a357c64b24a4bf771dd23 Mon Sep 17 00:00:00 2001
+From: halbritt <10265718+halbritt@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 23:37:05 -0800
+Subject: [PATCH] fft: remove per-object fftwf_cleanup call
+
+Do not call process-global fftwf_cleanup() from fft_destroy(), which invalidates FFTW plans owned by other live fft_obj instances.
+---
+ src/utils/fft.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/src/utils/fft.c b/src/utils/fft.c
+index eea0601..b481c67 100644
+--- a/src/utils/fft.c
++++ b/src/utils/fft.c
+@@ -55,8 +55,6 @@
+         fftwf_free(obj->realArray);
+         fftwf_free(obj->complexArray);
+ 
+-        fftwf_cleanup();
+-
+         free((void *) obj);
+ 
+     }
+-- 
+2.53.0
+

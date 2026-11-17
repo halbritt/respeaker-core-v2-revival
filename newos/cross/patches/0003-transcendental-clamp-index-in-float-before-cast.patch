@@ -1,0 +1,46 @@
+From 53a67f3b63baf65185b7bf03942e2e429d9ff9d6 Mon Sep 17 00:00:00 2001
+From: halbritt <10265718+halbritt@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 23:37:05 -0800
+Subject: [PATCH] transcendental: clamp index in float before integer cast
+
+Avoid float-cast-overflow and signed integer overflow in transcendental_process() by clamping scaled = floorf(value / obj->interval) + 1.0f in float (catching NaN, -Inf, +Inf, and out-of-range values) before casting to unsigned int.
+---
+ src/utils/transcendental.c | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/src/utils/transcendental.c b/src/utils/transcendental.c
+index 920b18b..af6dd13 100644
+--- a/src/utils/transcendental.c
++++ b/src/utils/transcendental.c
+@@ -90,16 +90,24 @@
+ 
+     float transcendental_process(const transcendental_obj * obj, const float value) {
+ 
+-        signed int iElement;
++        float scaled;
++        unsigned int iElement;
++
++        if (obj->nElements == 0) {
++            return 0.0f;
++        }
+ 
+-        iElement = ((signed int) floorf(value / obj->interval)) + 1;
++        scaled = floorf(value / obj->interval) + 1.0f;
+ 
+-        if (iElement < 0) {
++        if (!(scaled >= 0.0f)) {
+             iElement = 0;
+         }
+-        if (iElement > (obj->nElements - 1)) {
++        else if (scaled >= (float) (obj->nElements - 1)) {
+             iElement = obj->nElements - 1;
+         }
++        else {
++            iElement = (unsigned int) scaled;
++        }
+ 
+         return obj->array[iElement];
+ 
+-- 
+2.53.0
+

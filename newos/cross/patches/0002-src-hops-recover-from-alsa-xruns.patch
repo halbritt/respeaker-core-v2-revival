@@ -1,0 +1,97 @@
+From 0cbdcc42774b9ba0f3c49ca45f632e581b1f5e97 Mon Sep 17 00:00:00 2001
+From: halbritt <10265718+halbritt@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 23:37:05 -0800
+Subject: [PATCH] src_hops: recover from ALSA xruns and short reads
+
+Fix operator precedence in src_hops_process_interface_soundcard() (err = snd_pcm_readi(...) > 0), accumulate short reads across hopSize, and recover from -EPIPE/-ESTRPIPE/-EINTR via snd_pcm_recover() while propagating fatal PCM errors and bounding consecutive non-progress retries.
+---
+ src/source/src_hops.c | 67 ++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 57 insertions(+), 10 deletions(-)
+
+diff --git a/src/source/src_hops.c b/src/source/src_hops.c
+index 99e6e5d..d8d7fda 100644
+--- a/src/source/src_hops.c
++++ b/src/source/src_hops.c
+@@ -482,22 +482,69 @@ int src_hops_process_interface_file(src_hops_obj * obj) {
+ 
+ int src_hops_process_interface_soundcard(src_hops_obj * obj) {
+ 
+-    unsigned int nSamples;
+-    int rtnValue;
++    unsigned int totalFrames;
++    unsigned int frameBytes;
++    unsigned int retries;
++    snd_pcm_sframes_t nFrames;
+     int err;
+ 
+-    if (err = snd_pcm_readi(obj->ch, obj->buffer, obj->hopSize) > 0) {
+-
+-        rtnValue = 0;
+-        
++    if (obj->hopSize == 0) {
++        return 0;
+     }
+-    else {
+ 
+-        rtnValue = -1;
+-    
++    totalFrames = 0;
++    frameBytes = obj->bufferSize / obj->hopSize;
++    retries = 0;
++
++    while (totalFrames < obj->hopSize) {
++
++        nFrames = snd_pcm_readi(
++            obj->ch,
++            obj->buffer + ((size_t) totalFrames * (size_t) frameBytes),
++            obj->hopSize - totalFrames
++        );
++
++        if (nFrames > 0) {
++
++            totalFrames += (unsigned int) nFrames;
++            retries = 0;
++
++        }
++        else if (nFrames == 0) {
++
++            retries++;
++
++            if (retries >= 16) {
++                printf("Source hops: Exceeded ALSA zero-frame retries on device %s\n",
++                       (obj->interface && obj->interface->deviceName) ? obj->interface->deviceName : "(unknown)");
++                return -1;
++            }
++
++        }
++        else {
++
++            err = snd_pcm_recover(obj->ch, (int) nFrames, 0);
++
++            if (err < 0) {
++                printf("Source hops: Cannot read from audio device %s: %s\n",
++                       (obj->interface && obj->interface->deviceName) ? obj->interface->deviceName : "(unknown)",
++                       snd_strerror(err));
++                return -1;
++            }
++
++            retries++;
++
++            if (retries >= 16) {
++                printf("Source hops: Exceeded ALSA recovery retries on device %s\n",
++                       (obj->interface && obj->interface->deviceName) ? obj->interface->deviceName : "(unknown)");
++                return -1;
++            }
++
++        }
++
+     }
+ 
+-    return rtnValue;
++    return 0;
+ }
+ 
+ int src_hops_process_interface_pulseaudio(src_hops_obj * obj) {
+-- 
+2.53.0
+

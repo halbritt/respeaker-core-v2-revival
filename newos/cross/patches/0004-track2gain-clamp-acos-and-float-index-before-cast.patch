@@ -1,0 +1,83 @@
+From 3baede2ce24ad3cb7113e8c218b3fa9a2d0ba383 Mon Sep 17 00:00:00 2001
+From: halbritt <10265718+halbritt@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 23:37:05 -0800
+Subject: [PATCH] track2gain: clamp acos input and float index before cast
+
+Guard dNorm * uNorm == 0 and nThetas == 0, clamp cosTheta to [-1.0f, 1.0f] before acosf(), clamp idxFloat in float before casting to unsigned int, remove dead < 0 unsigned check, and remove unused iThetaFilter.
+---
+ src/system/track2gain.c | 34 +++++++++++++++++++++++++++++-----
+ 1 file changed, 29 insertions(+), 5 deletions(-)
+
+diff --git a/src/system/track2gain.c b/src/system/track2gain.c
+index bf242d8..841e39f 100644
+--- a/src/system/track2gain.c
++++ b/src/system/track2gain.c
+@@ -58,13 +58,15 @@
+         unsigned int iChannel;
+         
+         unsigned int iThetaMic;
+-        unsigned int iThetaFilter;
+         
+         float ux, uy, uz;
+         float uNorm;
+         float dx, dy, dz;
+         float dNorm;
+ 
++        float denom;
++        float cosTheta;
++        float idxFloat;
+         float projMic;
+         float thetaMic;
+         float gainMic;
+@@ -81,6 +83,11 @@
+ 
+                 for (iChannel = 0; iChannel < obj->nChannels; iChannel++) {
+ 
++                    if (beampatterns_mics->nThetas == 0) {
++                        gains->array[iSep * obj->nChannels + iChannel] = 0.0f;
++                        continue;
++                    }
++
+                     dx = obj->directions[iChannel * 3 + 0];
+                     dy = obj->directions[iChannel * 3 + 1];
+                     dz = obj->directions[iChannel * 3 + 2];
+@@ -88,15 +95,32 @@
+                     dNorm = sqrtf(dx * dx + dy * dy + dz * dz);
+ 
+                     projMic = dx * ux + dy * uy + dz * uz;
+-                    thetaMic = (360.0f/(2.0f * M_PI)) * acosf(projMic / (dNorm * uNorm));
+-                    iThetaMic = roundf((thetaMic - beampatterns_mics->minThetas[iChannel]) / (beampatterns_mics->deltaThetas[iChannel]) + beampatterns_mics->minThetas[iChannel]);
++                    denom = dNorm * uNorm;
++
++                    if (denom > 0.0f) {
++                        cosTheta = projMic / denom;
++                        if (cosTheta > 1.0f) {
++                            cosTheta = 1.0f;
++                        }
++                        else if (cosTheta < -1.0f) {
++                            cosTheta = -1.0f;
++                        }
++                        thetaMic = (360.0f/(2.0f * M_PI)) * acosf(cosTheta);
++                        idxFloat = roundf((thetaMic - beampatterns_mics->minThetas[iChannel]) / (beampatterns_mics->deltaThetas[iChannel]) + beampatterns_mics->minThetas[iChannel]);
++                    }
++                    else {
++                        idxFloat = 0.0f;
++                    }
+ 
+-                    if (iThetaMic < 0) {
++                    if (!(idxFloat >= 0.0f)) {
+                         iThetaMic = 0;
+                     }
+-                    if (iThetaMic >= beampatterns_mics->nThetas) {
++                    else if (idxFloat >= (float) beampatterns_mics->nThetas) {
+                         iThetaMic = beampatterns_mics->nThetas - 1;
+                     }
++                    else {
++                        iThetaMic = (unsigned int) idxFloat;
++                    }
+ 
+                     gainMic = beampatterns_mics->gains[iChannel * beampatterns_mics->nThetas + iThetaMic];
+ 
+-- 
+2.53.0
+

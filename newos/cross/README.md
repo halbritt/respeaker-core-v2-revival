@@ -1,0 +1,25 @@
+# ODAS `armhf` Cross-Build (`newos/cross/`)
+
+Cross-compiles [introlab/odas](https://github.com/introlab/odas) (pinned base commit `004cb82`) for Debian 13 (`trixie`) `armhf` on ReSpeaker Core v2 (`rk3229`).
+
+## Layout
+
+- `Dockerfile`: `debian:trixie` + `armhf` cross toolchain and `libfftw3-dev:armhf`, `libconfig-dev:armhf`, `libasound2-dev:armhf`, `libpulse-dev:armhf`.
+- `cross.sh`: Wrapper to execute commands inside the `rsp-cross` Docker container with `newos/cross` mounted at `/work`.
+- `build-odas.sh`: Idempotently applies `patches/*.patch` (auto-detecting `-p0` vs `-p1`) to `src/odas` and builds both `out/odas-stock/` and `out/odas-a7/` (`-mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard`).
+- `patches/`: Patch series applied on top of `introlab/odas` `004cb82`:
+  - `0001-steer2demixing-ds-zero-masked-channel-column.patch`: Zero full frequency column for masked channels (`RESPEAKER-4`).
+  - `0002-src-hops-recover-from-alsa-xruns.patch`: ALSA xrun/suspend/EINTR recovery via `snd_pcm_recover()` + short-read accumulation (`RESPEAKER-5`).
+  - `0003`-`0008`: Fixes for 6 latent ODAS bugs (`transcendental.c`, `track2gain.c`, `mod_ssl.c`, `env2env.c`, `fft.c`, `snk_tracks.c`; `RESPEAKER-6`).
+- `upstream/`: Archival upstream PR notes (`RESPEAKER-4-steer2demixing-pr.md`).
+
+## Usage
+
+```sh
+docker build -t rsp-cross newos/cross
+git clone https://github.com/introlab/odas.git newos/cross/src/odas
+git -C newos/cross/src/odas checkout 004cb82
+./newos/cross/cross.sh ./build-odas.sh
+```
+
+Do not commit `src/` or `out/` to git.

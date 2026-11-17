@@ -1,0 +1,34 @@
+From 409223a7cfd4edad5d42bb6ba8778c24a16e806e Mon Sep 17 00:00:00 2001
+From: halbritt <10265718+halbritt@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 23:37:05 -0800
+Subject: [PATCH] mod_ssl: reset maxIndex per scan level
+
+Initialize maxValue and reset maxIndex = 0 at the start of each scan level peak search in mod_ssl_process() so fine scan levels do not retain a stale coarse index when index 0 holds the maximum.
+---
+ src/module/mod_ssl.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/module/mod_ssl.c b/src/module/mod_ssl.c
+index 87683c5..19d1b35 100644
+--- a/src/module/mod_ssl.c
++++ b/src/module/mod_ssl.c
+@@ -163,7 +163,7 @@
+         unsigned int iLevel;
+         unsigned int iPoint;
+ 
+-        float maxValue;
++        float maxValue = 0.0f;
+         unsigned int maxIndex;
+ 
+         if (msg_spectra_isZero(obj->in) == 0) {
+@@ -222,6 +222,7 @@
+                     	                   obj->aimgs[iLevel]);
+ 
+                         maxValue = obj->aimgs[iLevel]->array[0];
++                        maxIndex = 0;
+ 
+                         for (iPoint = 0; iPoint < obj->aimgs[iLevel]->aimgSize; iPoint++) {
+ 
+-- 
+2.53.0
+

@@ -1,0 +1,26 @@
+From 1a85c05f43db9fc95fe76814d72757038c4eb778 Mon Sep 17 00:00:00 2001
+From: halbritt <10265718+halbritt@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 23:37:05 -0800
+Subject: [PATCH] env2env: initialize bTotal in mcra constructor
+
+Initialize bTotal = 0.0f before accumulating normalization weights in env2env_mcra_construct_zero().
+---
+ src/system/env2env.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/system/env2env.c b/src/system/env2env.c
+index 1cd3dc5..7fc5579 100644
+--- a/src/system/env2env.c
++++ b/src/system/env2env.c
+@@ -34,7 +34,7 @@
+         env2env_mcra_obj * obj;
+         unsigned int n;
+         unsigned int iChannel;
+-        float bTotal;
++        float bTotal = 0.0f;
+ 
+         obj = (env2env_mcra_obj *) malloc(sizeof(env2env_mcra_obj));
+ 
+-- 
+2.53.0
+
