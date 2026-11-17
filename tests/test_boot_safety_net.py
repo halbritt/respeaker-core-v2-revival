@@ -564,3 +564,14 @@ def test_f6_t2_debug_initrd_without_rspboot_always_hands_back_to_emmc(tmp_path: 
     assert (root / "reboot.log").is_file(), "init did not reboot"
     assert not (root / "sd" / "boot" / "uEnv.txt").exists(), "card still armed: the next boot comes straight back here"
     assert (root / "sd" / "boot" / "uEnv.txt.done").is_file()
+
+
+def test_f6_t2_image_reattaches_usb_console_and_drops_passwordless_serial_login() -> None:
+    """Text check only: the image script cannot run in the suite (it needs root and a rootfs)."""
+    txt = (NEWOS_DIR / "mk-sd-image.sh").read_text(encoding="utf-8")
+    unit = txt.split('rsp-usb-console.service" <<\'EOF\'', 1)[1].split("\nEOF\n", 1)[0]
+    assert "Before=serial-getty@ttyGS0.service" in unit
+    # systemd expands $u itself unless it is written $$u; the unexpanded form disconnects nothing
+    assert "> $$u/soft_connect" in unit and "> $u/soft_connect" not in unit
+    assert "multi-user.target.wants/rsp-usb-console.service" in txt
+    assert 'rm -f "$R/etc/systemd/system/serial-getty@.service.d/override.conf"' in txt

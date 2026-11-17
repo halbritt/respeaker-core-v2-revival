@@ -360,6 +360,24 @@ echo g_serial > "$R/etc/modules-load.d/g_serial.conf"
 mkdir -p "$R/etc/systemd/system/getty.target.wants"
 ln -sf /usr/lib/systemd/system/serial-getty@.service \
 	"$R/etc/systemd/system/getty.target.wants/serial-getty@ttyGS0.service"
+# The gadget link set up by the initramfs does not survive into the full system (the host
+# still shows the device, but nothing passes): re-attach it once before the login starts.
+cat > "$R/etc/systemd/system/rsp-usb-console.service" <<'EOF'
+[Unit]
+Description=Re-attach the USB serial gadget after the initramfs
+ConditionPathIsDirectory=/sys/class/udc
+Before=serial-getty@ttyGS0.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "for u in /sys/class/udc/*; do echo disconnect > $$u/soft_connect; sleep 1; echo connect > $$u/soft_connect; done"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+ln -sf /etc/systemd/system/rsp-usb-console.service "$R/etc/systemd/system/multi-user.target.wants/rsp-usb-console.service"
+# Armbian logs root in without a password on every serial console; ask for a login instead.
+rm -f "$R/etc/systemd/system/serial-getty@.service.d/override.conf"
 
 sync
 umount "$R"; losetup -d "$LOOP_OUT"; LOOP_OUT=

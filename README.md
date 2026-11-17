@@ -202,8 +202,6 @@ the command line means `bringup`.
   but installing to it is not scripted.
 - Playback (the on-chip DAC), echo cancellation, a local wake-word model and the LED ring
   are not set up. The loopback channels are captured but unused.
-- The USB serial console works in the initramfs and under the vendor image, but not once the
-  new system is fully up.
 - The kernel's USB PHY use-after-free (see above) is worked around in the device tree; a fix
   for the driver is in `newos/port/patches/` and has not been sent upstream.
 - Mic gain is 24 dB: at 28 dB a talker close to the board peaked at -0.8 dBFS. Not calibrated further.
