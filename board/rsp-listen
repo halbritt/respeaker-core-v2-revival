@@ -5,15 +5,21 @@ Reads the event stream of rsp-stt (GET /events, Server-Sent Events) and, for eac
 that is addressed to the wake phrase, runs a command with the utterance as JSON on stdin and
 the text in $RSP_TEXT (direction in $RSP_AZ, when known). Standard library only.
 
-  rsp-listen --url http://127.0.0.1:8911/events --wake 'computer|hey board' -- ./my-agent
-  rsp-listen --print                      # just show every event
+  rsp-listen --name computer -- ./my-agent     # "could you check that, computer?"
+  rsp-listen --wake 'hey board' -- ./my-agent  # exact phrase (regular expression)
+  rsp-listen --print                           # just show every event
 
-After a wake phrase the next --follow seconds of speech are passed on too, so a
-conversation does not need the phrase in every sentence. Without --wake everything is
-passed on. The wake phrase is matched in the transcript text, so it costs nothing on the
-board, but the reaction only comes once the utterance has been transcribed.
+Addressing. --name matches a name anywhere in the sentence and tolerates the transcriber's
+spelling ("Jarvis", "Jervis", "jarvis's"); --wake matches a regular expression exactly. After
+an addressed utterance the conversation stays open for --follow seconds, but only for speech
+from about the same direction (--follow-az degrees), so the name is not needed in every
+sentence and a television elsewhere in the room does not join in. The window restarts when
+the command returns. Without --name or --wake everything is passed on.
+
+Matching is done on the transcript, so it costs nothing on the board, but the reaction only
+comes once the utterance has been transcribed.
 """
-import argparse, json, os, re, subprocess, sys, time, urllib.request
+import argparse, datetime, difflib, json, os, re, subprocess, sys, time, urllib.request
 
 def events(url, token):
     """Yield (event, data) from an SSE stream, reconnecting when it drops."""
@@ -37,41 +43,122 @@ def events(url, token):
             print("rsp-listen: stream lost (%s), reconnecting" % e, file=sys.stderr)
             time.sleep(3)
 
+WORD = re.compile(r"[^\W_]+(?:'[^\W_]+)?")
+
+def find_name(text, names, fuzzy):
+    """Span (start, end) of the first word run in text that is one of names, or None.
+    A name may be several words. fuzzy is the similarity (0..1) each word must reach; words
+    of fewer than four letters must match exactly."""
+    words = [(m.group(0).lower(), m.start(), m.end()) for m in WORD.finditer(text)]
+    def same(got, want):
+        if got.endswith("'s"):
+            got = got[:-2]
+        return got == want or (fuzzy < 1 and len(want) >= 4 and
+                               difflib.SequenceMatcher(None, got, want).ratio() >= fuzzy)
+    for name in names:
+        parts = name.lower().split()
+        for i in range(len(words) - len(parts) + 1):
+            run = words[i:i + len(parts)]
+            if all(same(w, want) for (w, _, _), want in zip(run, parts)):
+                return run[0][1], run[-1][2]
+    return None
+
+def az_apart(a, b):
+    return abs((a - b + 180) % 360 - 180)
+
+def spoken_at(d, now):
+    """When the utterance ended, by its own timestamp; events can queue while a command runs.
+    Falls back to now if the stamp is missing or the two clocks disagree by minutes."""
+    try:
+        t = datetime.datetime.strptime(d["ts"], "%Y-%m-%dT%H:%M:%S%z").timestamp()
+    except Exception:
+        return now
+    return min(t, now) if abs(t - now) < 600 else now
+
+class Gate:
+    """Decides whether an utterance is addressed to the agent, and why."""
+    def __init__(self, wake=None, names=(), fuzzy=0.8, follow=20.0, follow_az=40.0, strip=False):
+        self.wake = re.compile(wake, re.I) if wake else None
+        self.names, self.fuzzy = [n for n in names if n.strip()], fuzzy
+        self.follow, self.follow_az, self.strip = follow, follow_az, strip
+        self.open_until, self.az = 0.0, None
+
+    def check(self, d, when):
+        """Return (why, text) for an utterance record spoken at time `when`; why is "name",
+        "wake", "follow", "all", or "" when it is not for the agent."""
+        text = d.get("text", "").replace("\n", " ").strip()
+        if not self.wake and not self.names:
+            return "all", text
+        span, why = None, ""
+        if self.names:
+            span = find_name(text, self.names, self.fuzzy)
+            why = "name" if span else ""
+        if not span and self.wake:
+            m = self.wake.search(text)
+            span, why = (m.span(), "wake") if m else (None, "")
+        az = d.get("az")
+        if not span:
+            if when > self.open_until:
+                return "", text
+            if self.follow_az > 0 and az is not None and self.az is not None \
+                    and az_apart(az, self.az) > self.follow_az:
+                return "", text                      # someone else, somewhere else
+            why = "follow"
+        elif self.strip:
+            rest = text[:span[0]] + text[span[1]:]
+            rest = re.sub(r"\s+([,.!?])", r"\1", re.sub(r"\s{2,}", " ", rest))
+            rest = re.sub(r",(?:\s*[,.!?])+", lambda m: m.group(0).rstrip()[-1], rest)
+            text = rest.strip(" ,.!?") or text
+        self.touch(when, az)
+        return why, text
+
+    def touch(self, when, az=None):
+        """Keep the conversation open from `when`; remember where the talker is."""
+        self.open_until = max(self.open_until, when + self.follow)
+        if az is not None:
+            self.az = az
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--url", default=os.environ.get("RSP_EVENTS", "http://127.0.0.1:8911/events"))
     p.add_argument("--token", default=os.environ.get("RSP_TOKEN", ""))
+    p.add_argument("--name", action="append", default=[],
+                   help="name the agent answers to, anywhere in a sentence; repeat for several")
+    p.add_argument("--fuzzy", type=float, default=0.8,
+                   help="how close a word must be to --name, 0..1 (1 = exact spelling only)")
     p.add_argument("--wake", help="regular expression that marks speech as addressed to the agent")
-    p.add_argument("--follow", type=float, default=20, help="seconds after a wake phrase that still count")
-    p.add_argument("--strip-wake", action="store_true", help="remove the wake phrase from the text passed on")
+    p.add_argument("--follow", type=float, default=20, help="seconds a conversation stays open")
+    p.add_argument("--follow-az", type=float, default=40,
+                   help="follow-ups must come from within this many degrees of the talker (0 = anywhere)")
+    p.add_argument("--strip-wake", action="store_true", help="remove the name or wake phrase from the text passed on")
     p.add_argument("--print", action="store_true", dest="show", help="print events instead of running a command")
+    p.add_argument("--verbose", action="store_true", help="say on stderr why each utterance was passed on or ignored")
     p.add_argument("command", nargs=argparse.REMAINDER, help="-- command to run per utterance")
     a = p.parse_args()
     cmd = a.command[1:] if a.command[:1] == ["--"] else a.command
-    wake = re.compile(a.wake, re.I) if a.wake else None
-    awake_until = 0.0
+    gate = Gate(a.wake, a.name, a.fuzzy, a.follow, a.follow_az, a.strip_wake)
     for kind, d in events(a.url, a.token):
         if a.show:
             print(kind, json.dumps(d), flush=True)
         if kind != "utterance":
             continue
-        text, now = d.get("text", "").replace("\n", " ").strip(), time.time()
-        if wake:
-            hit = wake.search(text)
-            if not hit and now > awake_until:
-                continue
-            awake_until = now + a.follow
-            if hit and a.strip_wake:
-                text = (text[:hit.start()] + text[hit.end():]).strip(" ,.!?") or text
+        why, text = gate.check(d, spoken_at(d, time.time()))
+        if a.verbose:
+            print("rsp-listen: %s az=%s: %s" % (why or "ignored", d.get("az", "?"), text[:70]), file=sys.stderr)
+        if not why:
+            continue
         if not cmd:
             if not a.show:
                 print(text, flush=True)
             continue
-        env = dict(os.environ, RSP_TEXT=text, RSP_AZ=str(d.get("az", "")), RSP_TS=d.get("ts", ""))
+        env = dict(os.environ, RSP_TEXT=text, RSP_AZ=str(d.get("az", "")), RSP_TS=d.get("ts", ""),
+                   RSP_WHY=why)
         try:
-            subprocess.run(cmd, input=json.dumps(dict(d, text=text)).encode(), env=env, timeout=300)
+            subprocess.run(cmd, input=json.dumps(dict(d, text=text, addressed=why)).encode(),
+                           env=env, timeout=300)
         except Exception as e:
             print("rsp-listen: command failed: %s" % e, file=sys.stderr)
+        gate.touch(time.time())      # the follow window counts from the end of the reply
 
 if __name__ == "__main__":
     try:

@@ -97,15 +97,25 @@ stream of `speech_start`, `speech_end` and `utterance`; `GET /recent` returns th
 utterances. It carries what is said in the room, so it binds to localhost by default; forward
 it with `ssh -L 8911:127.0.0.1:8911 <board>`, or bind it wider and set `STT_HTTP_TOKEN`.
 
-`rsp-listen` (standard library only, runs anywhere) consumes the stream:
+`rsp-listen` (standard library only, runs anywhere) consumes the stream and decides which
+speech is meant for the agent:
 
 ```
 rsp-listen --print
-rsp-listen --wake 'computer' --strip-wake -- ./my-agent   # utterance JSON on stdin, text in $RSP_TEXT
+rsp-listen --name computer --strip-wake -- ./my-agent   # utterance JSON on stdin, text in $RSP_TEXT
 ```
 
-The wake phrase is matched in the transcript, so it needs no model on the board; speech in
-the 20 s after a match is passed on as well.
+- `--name` matches a name anywhere in the sentence ("could you check that, computer?") and
+  tolerates the transcriber's spelling of it. `--wake` takes a regular expression instead.
+- After an addressed utterance the conversation stays open for `--follow` seconds (default
+  20), counted from when the command returns, so follow-ups need no name.
+- Follow-ups must come from within `--follow-az` degrees (default 40) of the talker, so a
+  television or a second conversation elsewhere in the room is not picked up. The reference
+  direction moves with the talker.
+- The command gets `addressed` (`name`, `wake` or `follow`) in the JSON and `$RSP_WHY`.
+
+Matching is done on the transcript, so it needs no model on the board, but everything said
+in the room is still transcribed first.
 
 ## ODAS
 
