@@ -527,3 +527,24 @@ def test_f6_t2_rsp_preinit_release_profile_skips_deadman_prunes_and_hands_off_wa
         if wdog_proc is not None and wdog_proc.poll() is None:
             wdog_proc.kill()
             wdog_proc.wait(timeout=5)
+
+
+@pytestmark_unshare
+@pytest.mark.parametrize("profile_word", ["rsp_safety=release", ""])
+def test_f6_t2_debug_initrd_without_rspboot_always_hands_back_to_emmc(tmp_path: Path, profile_word: str) -> None:
+    """Without rspboot the initramfs is in staged bring-up mode: when no stage is left it must
+    disarm the card before rebooting, whatever the profile, or the board reboots forever."""
+    root = tmp_path / "rootfs"
+    _init_chroot_rootfs(root)
+    (root / "proc" / "cmdline").write_text(f"rootwait {profile_word}\n", encoding="utf-8")
+    (root / "dev" / "mmcblk0p2").write_text("", encoding="utf-8")
+    (root / "sd" / "boot").mkdir(parents=True)
+    (root / "sd" / "etc").mkdir(parents=True)
+    (root / "sd" / "etc" / "rsp-safety").write_text("release\n", encoding="utf-8")
+    (root / "sd" / "boot" / "uEnv.txt").write_text("dtb=rk3229-respeaker-v2.dtb\n", encoding="utf-8")
+
+    res = _run_chroot(root, ["/init"], timeout=60)
+    assert res.returncode == 0, res.stderr
+    assert (root / "reboot.log").is_file(), "init did not reboot"
+    assert not (root / "sd" / "boot" / "uEnv.txt").exists(), "card still armed: the next boot comes straight back here"
+    assert (root / "sd" / "boot" / "uEnv.txt.done").is_file()
