@@ -1,5 +1,5 @@
 From b2f9276975c66b3b695c32567ce5279ce34dc918 Mon Sep 17 00:00:00 2001
-From: halbritt <10265718+halbritt@users.noreply.github.com>
+From: Heath Albritton <10265718+halbritt@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 23:47:23 -0800
 Subject: [PATCH] phy: rockchip: inno-usb2: disable work on probe failure and
  removal

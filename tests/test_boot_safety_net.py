@@ -9,17 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from conftest import NEWOS_DIR, unshare_available
+from conftest import BUSYBOX_HOST, NEWOS_DIR, chroot_prereq_missing, run_bounded
 
 MK_SD_IMAGE = NEWOS_DIR / "mk-sd-image.sh"
 RSP_PREINIT = NEWOS_DIR / "overlay" / "sbin" / "rsp-preinit"
 DEBUG_INIT = NEWOS_DIR / "debug-initrd" / "init"
-BUSYBOX_HOST = Path("/usr/bin/busybox")
 
-pytestmark_unshare = pytest.mark.skipif(
-    not (unshare_available() and BUSYBOX_HOST.is_file()),
-    reason="unshare -Ur or static /usr/bin/busybox unavailable on host",
-)
+# The reason names what this host lacks (user namespaces, the static busybox, or both).
+pytestmark_unshare = pytest.mark.skipif(bool(chroot_prereq_missing()), reason=chroot_prereq_missing())
 
 
 def _init_chroot_rootfs(root: Path) -> None:
@@ -253,9 +250,27 @@ def test_f6_t1_debug_initrd_accepts_kernel_restart_and_powerdown_markers(tmp_pat
 # --- Tier 2: Boundary, Corner & Error Paths (6 tests) ---
 
 
+def _no_remote_tools_env(tmp_path: Path, **extra: str) -> tuple[dict[str, str], Path]:
+    """An environment in which the real mk-sd-image.sh cannot reach a board or gain root
+    even if its guards fail: `ssh`, `scp`, `sudo` and `sshpass` on PATH are stubs that log
+    the attempt and exit non-zero, and HOME is an empty directory (no keys, no ssh config)."""
+    stubs = tmp_path / "stub-bin"
+    stubs.mkdir(exist_ok=True)
+    calls = tmp_path / "remote-calls.log"
+    for name in ("ssh", "scp", "sudo", "sshpass"):
+        stub = stubs / name
+        stub.write_text(f"#!/bin/sh\necho \"{name} $*\" >> {str(calls)!r}\nexit 97\n", encoding="utf-8")
+        stub.chmod(0o755)
+    home = tmp_path / "empty-home"
+    home.mkdir(exist_ok=True)
+    env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(home), "LANG": "C"}
+    env.update(extra)
+    return env, calls
+
+
 def test_f6_t2_mk_sd_image_fails_fast_without_sudo_user_or_wifi_ssid(tmp_path: Path) -> None:
-    env_no_sudo = {k: v for k, v in os.environ.items() if k != "SUDO_USER"}
-    res_sudo = subprocess.run(["bash", str(MK_SD_IMAGE)], env=env_no_sudo, capture_output=True, text=True, check=False)
+    env, calls = _no_remote_tools_env(tmp_path)          # neither SUDO_USER nor WIFI_SSID set
+    res_sudo = run_bounded(["bash", str(MK_SD_IMAGE)], env=env, timeout=30)
     assert res_sudo.returncode != 0
     assert "SUDO_USER" in res_sudo.stderr
 
@@ -269,21 +284,19 @@ def test_f6_t2_mk_sd_image_fails_fast_without_sudo_user_or_wifi_ssid(tmp_path: P
     sb_script = sb / "mk-sd-image.sh"
     shutil.copy2(MK_SD_IMAGE, sb_script)
 
-    env_no_wifi = {k: v for k, v in os.environ.items() if k != "WIFI_SSID"}
-    env_no_wifi["SUDO_USER"] = "tester"
-    res_wifi = subprocess.run(["bash", str(sb_script)], env=env_no_wifi, capture_output=True, text=True, check=False)
+    res_wifi = run_bounded(["bash", str(sb_script)], env={**env, "SUDO_USER": "tester"}, timeout=30)
     assert res_wifi.returncode != 0
     assert "WIFI_SSID" in res_wifi.stderr
 
     assert "SAFETY_PROFILE" in MK_SD_IMAGE.read_text(encoding="utf-8")
-    res_bad = subprocess.run(
-        ["bash", str(MK_SD_IMAGE), "--safety=bogus"],
-        env={**os.environ, "RSP_PARSE_ONLY": "1"},
-        capture_output=True,
-        text=True,
-        check=False,
+    res_bad = run_bounded(
+        ["bash", str(MK_SD_IMAGE), "--safety=bogus"], env={**env, "RSP_PARSE_ONLY": "1"}, timeout=30
     )
     assert res_bad.returncode == 2
+
+    # the guards fired before anything tried to reach a board or become root
+    assert not calls.exists(), f"mk-sd-image.sh ran a remote/privileged command: {calls.read_text()}"
+    assert not (sb / "out").exists()
 
 
 @pytestmark_unshare

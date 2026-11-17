@@ -1,5 +1,5 @@
 From 3baede2ce24ad3cb7113e8c218b3fa9a2d0ba383 Mon Sep 17 00:00:00 2001
-From: halbritt <10265718+halbritt@users.noreply.github.com>
+From: Heath Albritton <10265718+halbritt@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 23:37:05 -0800
 Subject: [PATCH] track2gain: clamp acos input and float index before cast
 

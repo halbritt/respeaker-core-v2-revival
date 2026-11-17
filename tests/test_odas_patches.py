@@ -7,10 +7,14 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from conftest import NEWOS_DIR
 
 CROSS_DIR = NEWOS_DIR / "cross"
 PATCHES_DIR = CROSS_DIR / "patches"
+ODAS_CHECKOUT = CROSS_DIR / "src" / "odas"      # untracked; see build-odas.sh
+ODAS_BASE = "004cb82"                           # the commit build-odas.sh expects
 
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
@@ -78,7 +82,12 @@ def _rel_target_path(file_entry: dict, pflag: str) -> Path:
 
 
 def build_preimage_tree(root: Path, patch_text: str) -> str:
-    """Reconstruct synthetic pre-image files for all hunks in `patch_text` under `root`."""
+    """Reconstruct synthetic pre-image files for all hunks in `patch_text` under `root`.
+
+    The files are built from the patch's own context and removed lines, so a patch always
+    applies to them: this checks that a patch is well formed and gives build-odas.sh
+    something to patch. It says nothing about upstream. The checks against the real ODAS
+    and kernel sources are the *_pristine_* tests."""
     pflag = _pflag_for_patch(patch_text)
     for fentry in parse_unified_diff(patch_text):
         rel = _rel_target_path(fentry, pflag)
@@ -218,7 +227,8 @@ def test_f4_t1_odas_patches_valid_unified_diff_hunks() -> None:
                 assert new_lines == h["new_count"], f"{p.name}: expected {h['new_count']} new lines, got {new_lines}"
 
 
-def test_f4_t1_odas_patches_apply_to_synthetic_tree(tmp_path: Path) -> None:
+def test_f4_t1_odas_patches_are_self_consistent_on_synthetic_preimage(tmp_path: Path) -> None:
+    """Well-formedness only (see build_preimage_tree); not an upstream-apply check."""
     patches = sorted(PATCHES_DIR.glob("*.patch"))
     assert patches
     for p in patches:
@@ -283,6 +293,146 @@ def test_f4_t1_build_odas_mocked_execution_and_patch_integration(tmp_path: Path)
     res2 = subprocess.run(["sh", str(build_sh)], cwd=work, env=env, capture_output=True, text=True, check=False)
     assert res2.returncode == 0, f"Second run not idempotent: {res2.stdout}\n{res2.stderr}"
     assert "Patch already applied:" in res2.stdout
+
+
+# --- Real upstream: the patch stack against a pristine ODAS checkout ---
+
+
+def git_apply(tree: Path, patch: Path, *flags: str) -> subprocess.CompletedProcess[str]:
+    """`git apply` in `tree` (not a repository), with the -p level build-odas.sh would pick."""
+    return subprocess.run(
+        ["git", "apply", _pflag_for_patch(patch.read_text(encoding="utf-8")), *flags, str(patch)],
+        cwd=tree,
+        env={**os.environ, "GIT_CEILING_DIRECTORIES": str(tree.parent)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def pristine_odas_tree(dest: Path) -> Path:
+    """Export src/ and include/ of ODAS at ODAS_BASE into `dest`, from the object store of
+    the local checkout (its working tree, which may already be patched, is not touched).
+    Skips, naming what is missing."""
+    if shutil.which("git") is None:
+        pytest.skip("git not installed: cannot export pristine ODAS sources")
+    if not (ODAS_CHECKOUT / ".git").exists():
+        pytest.skip(
+            f"no ODAS git checkout at {ODAS_CHECKOUT} "
+            f"(clone ODAS there, commit {ODAS_BASE}; see newos/cross/build-odas.sh)"
+        )
+    have = subprocess.run(
+        ["git", "-C", str(ODAS_CHECKOUT), "cat-file", "-e", ODAS_BASE + "^{commit}"],
+        capture_output=True, timeout=30, check=False,
+    )
+    if have.returncode != 0:
+        pytest.skip(f"ODAS checkout at {ODAS_CHECKOUT} does not contain commit {ODAS_BASE}")
+    dest.mkdir(parents=True)
+    tar = dest.parent / (dest.name + ".tar")
+    with open(tar, "wb") as f:
+        subprocess.run(
+            ["git", "-C", str(ODAS_CHECKOUT), "archive", "--format=tar", ODAS_BASE, "src", "include"],
+            stdout=f, timeout=120, check=True,
+        )
+    subprocess.run(["tar", "-xf", str(tar), "-C", str(dest)], timeout=120, check=True)
+    tar.unlink()
+    return dest
+
+
+def apply_patch_stack(tree: Path) -> list[Path]:
+    """Apply patches/0001.. in order to `tree`; every one must apply cleanly. Returns the
+    files they touch."""
+    touched: list[Path] = []
+    for p in sorted(PATCHES_DIR.glob("*.patch")):
+        chk = git_apply(tree, p, "--check")
+        assert chk.returncode == 0, f"{p.name} does not apply to ODAS {ODAS_BASE}: {chk.stderr}"
+        res = git_apply(tree, p)
+        assert res.returncode == 0, f"{p.name}: {res.stderr}"
+        text = p.read_text(encoding="utf-8")
+        for fentry in parse_unified_diff(text):
+            rel = _rel_target_path(fentry, _pflag_for_patch(text))
+            if rel not in touched:
+                touched.append(rel)
+    return touched
+
+
+def test_f4_t1_odas_patch_stack_applies_in_order_to_pristine_checkout(tmp_path: Path) -> None:
+    tree = pristine_odas_tree(tmp_path / "odas")
+    before = {p: p.read_bytes() for p in tree.rglob("*.c")}
+    touched = apply_patch_stack(tree)
+    assert touched
+    for rel in touched:
+        assert (tree / rel).read_bytes() != before[tree / rel], f"{rel} unchanged after patching"
+    # each patch is now in the tree: applying any of them again must be refused
+    for p in sorted(PATCHES_DIR.glob("*.patch")):
+        assert git_apply(tree, p, "--check").returncode != 0, f"{p.name} applies twice"
+        assert git_apply(tree, p, "-R", "--check").returncode == 0, f"{p.name} does not reverse"
+
+
+def test_f4_t2_odas_patch_is_refused_when_upstream_file_differs(tmp_path: Path) -> None:
+    """The pristine-apply check can fail: change a line a patch depends on."""
+    tree = pristine_odas_tree(tmp_path / "odas")
+    p0001 = sorted(PATCHES_DIR.glob("0001-*.patch"))[0]
+    fentry = parse_unified_diff(p0001.read_text(encoding="utf-8"))[0]
+    target = tree / _rel_target_path(fentry, _pflag_for_patch(p0001.read_text(encoding="utf-8")))
+    removed = next(line[1:] for h in fentry["hunks"] for line in h["body"] if line.startswith("-") and line[1:].strip())
+    text = target.read_text(encoding="utf-8")
+    assert removed in text
+    target.write_text(text.replace(removed, "/* upstream changed this line */\n"), encoding="utf-8")
+    assert git_apply(tree, p0001, "--check").returncode != 0
+
+
+def gcc_syntax_check(tree: Path, rel: Path) -> tuple[bool, str]:
+    """(ok, detail) for `gcc -fsyntax-only` of one ODAS source; detail is the missing
+    header's name when a system header is absent, else the compiler output."""
+    res = subprocess.run(
+        ["gcc", "-fsyntax-only", "-I", str(tree / "include" / "odas"), "-I", str(tree / "include"), str(tree / rel)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    if res.returncode == 0:
+        return True, ""
+    m = re.search(r"fatal error: (\S+): No such file or directory", res.stderr)
+    if m and not (tree / "include" / "odas" / m.group(1)).exists():
+        return False, "missing header " + m.group(1)
+    return False, res.stderr
+
+
+def test_f4_t1_patched_odas_sources_pass_gcc_syntax_check(tmp_path: Path) -> None:
+    tree = pristine_odas_tree(tmp_path / "odas")
+    if shutil.which("gcc") is None:
+        pytest.skip("gcc not installed: cannot syntax-check the patched ODAS sources")
+    touched = [rel for rel in apply_patch_stack(tree) if rel.suffix == ".c"]
+    assert touched
+    unchecked: list[str] = []
+    for rel in touched:
+        ok, detail = gcc_syntax_check(tree, rel)
+        if not ok and detail.startswith("missing header "):
+            unchecked.append(f"{rel} ({detail})")
+            continue
+        assert ok, f"{rel} does not compile after patching:\n{detail}"
+    if unchecked:
+        pytest.skip(
+            f"syntax-checked {len(touched) - len(unchecked)} of {len(touched)} patched files; "
+            f"development headers not installed for: {', '.join(unchecked)}"
+        )
+
+
+def test_f4_t2_gcc_syntax_check_rejects_a_broken_patched_source(tmp_path: Path) -> None:
+    """The syntax check can fail: break one patched file."""
+    tree = pristine_odas_tree(tmp_path / "odas")
+    if shutil.which("gcc") is None:
+        pytest.skip("gcc not installed: cannot syntax-check the patched ODAS sources")
+    apply_patch_stack(tree)
+    rel = Path("src/utils/transcendental.c")
+    ok, detail = gcc_syntax_check(tree, rel)
+    if not ok and detail.startswith("missing header "):
+        pytest.skip(f"cannot compile {rel}: {detail}")
+    assert ok, detail
+    with open(tree / rel, "a", encoding="utf-8") as f:
+        f.write("\nint broken( { return undeclared_symbol; }\n")
+    ok, detail = gcc_syntax_check(tree, rel)
+    assert not ok and "error" in detail
 
 
 # --- Tier 2: Boundary, Corner & Error Paths (6 tests) ---

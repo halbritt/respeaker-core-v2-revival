@@ -1,5 +1,5 @@
 From c2c88b70b7d3fe35ffd56e0f711ef3f2fbfb043f Mon Sep 17 00:00:00 2001
-From: halbritt <10265718+halbritt@users.noreply.github.com>
+From: Heath Albritton <10265718+halbritt@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 23:37:05 -0800
 Subject: [PATCH] snk_tracks: replace overlapping sprintf with bounded
  vsnprintf

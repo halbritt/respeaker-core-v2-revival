@@ -19,27 +19,28 @@ from pathlib import Path
 
 import pytest
 
-from conftest import BOARD_DIR, NEWOS_DIR, REPO_ROOT, unshare_available
-from test_odas_patches import build_preimage_tree, parse_unified_diff
+from conftest import (
+    BOARD_DIR,
+    NEWOS_DIR,
+    REPO_ROOT,
+    chroot_prereq_missing,
+    free_ports,
+    kill_group,
+    make_bounded_sleep_stub,
+    run_bounded,
+)
+from test_odas_patches import parse_unified_diff
 from test_privacy_hygiene import (
-    EXPECTED_NOREPLY_EMAIL,
     find_lan_ips,
     find_owner_leaks,
     find_private_hostnames,
     find_wifi_or_token_secrets,
     list_repo_files,
+    personal_commit_emails,
     read_text_if_not_binary,
+    require_git_checkout,
 )
 from test_syntax_imports import discover_repo_scripts
-
-BUSYBOX_HOST = Path("/usr/bin/busybox")
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
 
 # --- Tier 3: Cross-Feature Pairwise Combinations (7 tests) ---
 
@@ -86,7 +87,7 @@ def test_tier3_f1_f6_mk_sd_image_runtime_secrets_not_persisted_in_repo() -> None
 def test_tier3_f2_f3_board_cli_import_and_localhost_sse_auth_handshake(
     rsp_stt_loader, event_server_factory, tmp_path: Path
 ) -> None:
-    stt = rsp_stt_loader(env={"STT_HTTP_TOKEN": "t3-secret"})
+    stt = rsp_stt_loader(env={"STT_HTTP_TOKEN": "test-t3"})
     assert stt.audioop is None and stt.np is not None
     _, port = event_server_factory(stt)
 
@@ -111,7 +112,7 @@ def test_tier3_f2_f3_board_cli_import_and_localhost_sse_auth_handshake(
             "--url",
             f"http://127.0.0.1:{port}/events",
             "--token",
-            "t3-secret",
+            "test-t3",
             "--wake",
             "computer",
             "--strip-wake",
@@ -200,18 +201,8 @@ def test_tier3_f4_f5_patch_hygiene_across_odas_and_kernel_stacks(tmp_path: Path)
     )
     assert chk.returncode == 0, chk.stderr
 
-    for p in odas_patches:
-        od_tree = tmp_path / p.stem
-        pflag = build_preimage_tree(od_tree, p.read_text(encoding="utf-8"))
-        res = subprocess.run(
-            ["git", "apply", pflag, "--check", str(p)],
-            cwd=od_tree,
-            env={**os.environ, "GIT_CEILING_DIRECTORIES": str(tmp_path)},
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert res.returncode == 0, f"{p.name}: {res.stderr}"
+    # Whether the ODAS and PHY patches apply to their real upstream sources is checked by
+    # test_odas_patches (pristine checkout) and test_kernel_ac108_patches (mainline driver).
 
 
 def test_tier3_f5_f6_dts_pstore_ramoops_matches_debug_initrd_and_mk_sd_image() -> None:
@@ -264,7 +255,7 @@ def test_tier4_e2e_full_stt_pipeline_odas_vad_whisper_sse_to_rsp_listen(
     whisper_mock_factory, tmp_path: Path
 ) -> None:
     base_url, captured = whisper_mock_factory("Computer, turn on the desk light")
-    track_port, audio_port, sep_port, http_port = (_free_port() for _ in range(4))
+    track_port, audio_port, sep_port, http_port = free_ports(4)
 
     run_dir = tmp_path / "run"
     rec_dir = tmp_path / "rec"
@@ -348,12 +339,15 @@ def test_tier4_e2e_full_stt_pipeline_odas_vad_whisper_sse_to_rsp_listen(
         "STT_MIN_DYN_DB": "5",
     }
 
+    # Own process group: rsp-stt starts odaslive (here a fake that lingers) and arecord, and
+    # the whole group is killed in the finally block so nothing outlives the test.
     stt_proc = subprocess.Popen(
         [sys.executable, "-u", str(BOARD_DIR / "rsp-stt.py")],
         env=stt_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        start_new_session=True,
     )
     listen_proc = None
     try:
@@ -392,6 +386,7 @@ def test_tier4_e2e_full_stt_pipeline_odas_vad_whisper_sse_to_rsp_listen(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            start_new_session=True,
         )
         time.sleep(0.3)
         go_file.write_text("go\n", encoding="utf-8")
@@ -416,10 +411,8 @@ def test_tier4_e2e_full_stt_pipeline_odas_vad_whisper_sse_to_rsp_listen(
         assert captured and captured[0]["path"] == "/inference"
     finally:
         if listen_proc is not None:
-            listen_proc.terminate()
-            listen_proc.wait(timeout=5)
-        stt_proc.terminate()
-        stt_proc.wait(timeout=5)
+            kill_group(listen_proc)
+        kill_group(stt_proc)
 
 
 def test_tier4_e2e_offline_recording_cap_pruning_and_replay_transcript(
@@ -438,9 +431,9 @@ def test_tier4_e2e_offline_recording_cap_pruning_and_replay_transcript(
 
     (bin_dir / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     (bin_dir / "sudo").write_text("#!/bin/sh\nexec \"$@\"\n", encoding="utf-8")
-    (bin_dir / "sleep").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    for n in ("systemctl", "sudo", "sleep"):
+    for n in ("systemctl", "sudo"):
         (bin_dir / n).chmod(0o755)
+    make_bounded_sleep_stub(bin_dir)
 
     sandbox_rec = tmp_path / "rsp-record"
     sandbox_rec.write_text(
@@ -471,21 +464,20 @@ def test_tier4_e2e_offline_recording_cap_pruning_and_replay_transcript(
 
     t = threading.Thread(target=responder, daemon=True)
     t.start()
-    rec_res = subprocess.run(
+    rec_res = run_bounded(
         ["sh", str(sandbox_rec), "1", "take1"],
         env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(rec_home), "RSP_REC_CAP_MB": "1"},
-        capture_output=True,
-        text=True,
-        check=False,
+        timeout=20,
     )
     t.join(timeout=3)
     assert rec_res.returncode == 0, rec_res.stderr
     assert not old_raw.exists() and not old_jsonl.exists()
     assert new_raw.is_file()
 
-    # Now replay new_raw through sandboxed rsp-replay -> real rsp-stt.py offline -> fake odaslive
-    env_file = tmp_path / "rsp-stt.env"
-    env_file.write_text(
+    # Now replay new_raw through the real rsp-replay -> real rsp-stt.py offline -> fake odaslive
+    defaults = tmp_path / "defaults"
+    defaults.mkdir()
+    (defaults / "rsp-stt").write_text(
         (BOARD_DIR / "rsp-stt.env")
         .read_text(encoding="utf-8")
         .replace("STT_ODAS_CFG=/opt/rsp-stt/odas-respeaker-core-v2.cfg", f"STT_ODAS_CFG={BOARD_DIR / 'odas-respeaker-core-v2.cfg'}")
@@ -493,15 +485,7 @@ def test_tier4_e2e_offline_recording_cap_pruning_and_replay_transcript(
         .replace("STT_END_SILENCE_MS=1500", "STT_END_SILENCE_MS=150"),
         encoding="utf-8",
     )
-    sandbox_replay = tmp_path / "rsp-replay"
-    sandbox_replay.write_text(
-        (BOARD_DIR / "rsp-replay")
-        .read_text(encoding="utf-8")
-        .replace("/etc/default/rsp-stt.local", str(tmp_path / "none_local_env"))
-        .replace("/etc/default/rsp-stt", str(env_file)),
-        encoding="utf-8",
-    )
-    sandbox_replay.chmod(0o755)
+    track_port, audio_port, sep_port = free_ports(3)
 
     fake_odas = tmp_path / "offline_odas.py"
     fake_odas.write_text(
@@ -532,20 +516,21 @@ def test_tier4_e2e_offline_recording_cap_pruning_and_replay_transcript(
     fake_odas_bin.write_text(f"#!/bin/sh\nexec {sys.executable!r} {str(fake_odas)!r} \"$@\"\n", encoding="utf-8")
     fake_odas_bin.chmod(0o755)
 
-    replay_res = subprocess.run(
-        ["sh", str(sandbox_replay), str(new_raw), str(fake_odas_bin)],
+    replay_res = run_bounded(
+        ["sh", str(BOARD_DIR / "rsp-replay"), str(new_raw), str(fake_odas_bin)],
         env={
             "PATH": "/usr/bin:/bin",
             "PYTHONDONTWRITEBYTECODE": "1",
+            "RSP_DEFAULTS_DIR": str(defaults),
+            "RSP_REPLAY_TRACK_PORT": str(track_port),
+            "RSP_REPLAY_AUDIO_PORT": str(audio_port),
+            "RSP_REPLAY_SEP_PORT": str(sep_port),
             "RSP_STT": str(BOARD_DIR / "rsp-stt.py"),
             "STT_SERVER": f"{base_url}/inference",
             "STT_MIN_UTTERANCE_MS": "120",
             "STT_PREROLL_MS": "60",
         },
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
+        timeout=30,
     )
     assert replay_res.returncode == 0, f"{replay_res.stdout}\n{replay_res.stderr}"
     out_jsonl = new_raw.with_suffix(".transcript.jsonl")
@@ -557,13 +542,8 @@ def test_tier4_e2e_offline_recording_cap_pruning_and_replay_transcript(
 
 
 def test_tier4_e2e_release_hygiene_and_repo_readiness_gate(tmp_path: Path) -> None:
-    email = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "config", "--get", "user.email"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    assert email == EXPECTED_NOREPLY_EMAIL
+    require_git_checkout()
+    assert personal_commit_emails() == [], "personal mail-provider address in commit history"
     assert (REPO_ROOT / "LICENSE").is_file()
     assert (REPO_ROOT / "LICENSES" / "GPL-2.0-only.txt").is_file()
 
@@ -612,26 +592,12 @@ def test_tier4_e2e_kernel_ac108_dts_and_odas_patch_integration(tmp_path: Path) -
     assert "ramoops@90000000" in dts
     assert "phy-supply" not in dts
 
+    # The ODAS stack against its real upstream: test_odas_patches (pristine checkout tests).
     odas_patches = sorted((NEWOS_DIR / "cross" / "patches").glob("*.patch"))
     assert odas_patches
-    for p in odas_patches:
-        ot = tmp_path / p.stem
-        pflag = build_preimage_tree(ot, p.read_text(encoding="utf-8"))
-        chk = subprocess.run(
-            ["git", "apply", pflag, "--check", str(p)],
-            cwd=ot,
-            env={**os.environ, "GIT_CEILING_DIRECTORIES": str(tmp_path)},
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert chk.returncode == 0, f"{p.name}: {chk.stderr}"
 
 
-@pytest.mark.skipif(
-    not (unshare_available() and BUSYBOX_HOST.is_file()),
-    reason="unshare -Ur or static /usr/bin/busybox unavailable on host",
-)
+@pytest.mark.skipif(bool(chroot_prereq_missing()), reason=chroot_prereq_missing())
 def test_tier4_e2e_boot_safety_net_arm_deadman_and_pstore_recovery(tmp_path: Path) -> None:
     from test_boot_safety_net import _init_chroot_rootfs, _run_chroot
 

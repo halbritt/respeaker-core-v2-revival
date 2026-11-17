@@ -1,5 +1,5 @@
 From 409223a7cfd4edad5d42bb6ba8778c24a16e806e Mon Sep 17 00:00:00 2001
-From: halbritt <10265718+halbritt@users.noreply.github.com>
+From: Heath Albritton <10265718+halbritt@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 23:37:05 -0800
 Subject: [PATCH] mod_ssl: reset maxIndex per scan level
 

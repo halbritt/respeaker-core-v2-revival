@@ -4,7 +4,11 @@ usage: rsp-serial [-t SECONDS] 'command'   (logs in as respeaker if needed)"""
 import os, sys, termios, time, select, re, uuid
 
 DEV = os.environ.get("RSP_TTY", "/dev/ttyACM0")
-USER, PW = "respeaker", "respeaker"
+# Seeed's vendor image ships with user and password both "respeaker" (public default).
+# Set RSP_SERIAL_USER / RSP_SERIAL_PASSWORD if yours were changed.
+VENDOR_DEFAULT = "respeaker"
+USER = os.environ.get("RSP_SERIAL_USER", VENDOR_DEFAULT)
+PW = os.environ.get("RSP_SERIAL_PASSWORD", VENDOR_DEFAULT)
 
 def main():
     args = sys.argv[1:]

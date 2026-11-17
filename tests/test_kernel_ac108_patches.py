@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from conftest import NEWOS_DIR
-from test_odas_patches import build_preimage_tree, parse_unified_diff
+from conftest import NEWOS_DIR, REPO_ROOT
+from test_odas_patches import build_preimage_tree, git_apply, parse_unified_diff
 
 PORT_DIR = NEWOS_DIR / "port"
 TREE_A = PORT_DIR / "tree" / "a"
@@ -196,6 +196,8 @@ def _validate_port_patches_dir(patches_dir: Path, work_dir: Path) -> None:
                 assert old_lines == h["old_count"]
                 assert new_lines == h["new_count"]
 
+        # Well-formedness only: the pre-image is rebuilt from the patch itself. Whether the
+        # patch applies to the real driver is test_f5_t1_phy_patch_applies_to_pristine_mainline_driver.
         tree = work_dir / p.stem
         pflag = build_preimage_tree(tree, txt)
         chk = subprocess.run(
@@ -206,7 +208,7 @@ def _validate_port_patches_dir(patches_dir: Path, work_dir: Path) -> None:
             text=True,
             check=False,
         )
-        assert chk.returncode == 0, f"{p.name} failed synthetic pre-image check: {chk.stderr}"
+        assert chk.returncode == 0, f"{p.name} is not self-consistent (synthetic pre-image): {chk.stderr}"
 
     combined = "\n".join(p.read_text(encoding="utf-8") for p in patches)
     assert "drivers/phy/rockchip/" in combined and "phy-rockchip-inno-usb2.c" in combined, (
@@ -221,6 +223,58 @@ def test_f5_t1_port_patches_format_patch_headers(tmp_path: Path) -> None:
     _validate_port_patches_dir(patches_dir, tmp_path)
 
 
+PHY_PATCH_DIR = PORT_DIR / "patches"
+PHY_DRIVER = "drivers/phy/rockchip/phy-rockchip-inno-usb2.c"
+LOCAL_LINUX = REPO_ROOT / "local" / "linux"     # untracked clone of mainline, if the developer keeps one
+
+
+def pristine_phy_driver_tree(dest: Path) -> Path:
+    """A tree holding only the unpatched mainline PHY driver, read from the object store of
+    local/linux: origin/master if that ref exists, else the parent of HEAD (the clone's HEAD
+    is expected to be the fix itself). Skips, naming what is missing."""
+    if shutil.which("git") is None:
+        pytest.skip("git not installed: cannot read the mainline PHY driver")
+    if not (LOCAL_LINUX / ".git").exists():
+        pytest.skip(
+            f"no kernel clone at {LOCAL_LINUX} (a shallow clone of mainline "
+            f"is enough) to take a pristine {PHY_DRIVER} from"
+        )
+    for ref in ("origin/master", "HEAD~1"):
+        res = subprocess.run(
+            ["git", "-C", str(LOCAL_LINUX), "show", f"{ref}:{PHY_DRIVER}"],
+            capture_output=True, timeout=60, check=False,
+        )
+        if res.returncode == 0:
+            target = dest / PHY_DRIVER
+            target.parent.mkdir(parents=True)
+            target.write_bytes(res.stdout)
+            return dest
+    pytest.skip(f"{LOCAL_LINUX} has no {PHY_DRIVER} at origin/master or HEAD~1")
+
+
+def test_f5_t1_phy_patch_applies_to_pristine_mainline_driver(tmp_path: Path) -> None:
+    tree = pristine_phy_driver_tree(tmp_path / "linux")
+    patches = sorted(PHY_PATCH_DIR.glob("0001-*.patch"))
+    assert len(patches) == 1
+    before = (tree / PHY_DRIVER).read_bytes()
+    chk = git_apply(tree, patches[0], "--check")
+    assert chk.returncode == 0, f"{patches[0].name} does not apply to the mainline driver: {chk.stderr}"
+    assert git_apply(tree, patches[0]).returncode == 0
+    assert (tree / PHY_DRIVER).read_bytes() != before
+    assert git_apply(tree, patches[0], "--check").returncode != 0, "patch applies twice"
+
+
+def test_f5_t2_phy_patch_is_refused_when_mainline_driver_differs(tmp_path: Path) -> None:
+    """The pristine-apply check can fail: rename a symbol the patch's hunks rely on."""
+    tree = pristine_phy_driver_tree(tmp_path / "linux")
+    patch = sorted(PHY_PATCH_DIR.glob("0001-*.patch"))[0]
+    driver = tree / PHY_DRIVER
+    text = driver.read_text(encoding="utf-8")
+    assert "INIT_DELAYED_WORK" in text
+    driver.write_text(text.replace("INIT_DELAYED_WORK", "INIT_DEFERRED_WORK"), encoding="utf-8")
+    assert git_apply(tree, patch, "--check").returncode != 0
+
+
 # --- Tier 2: Boundary, Corner & Error Paths (6 tests) ---
 
 
@@ -233,7 +287,8 @@ def test_f5_t2_dts_u2phy_must_not_declare_phy_supply() -> None:
                 assert "phy-supply" not in block, f"{dts_path.name} {node} must not declare phy-supply"
 
 
-def test_f5_t2_dts_i2s1_pinctrl_excludes_gpio0_b3_and_balanced_braces(tmp_path: Path) -> None:
+def test_f5_t2_dts_i2s1_pinctrl_excludes_gpio0_b3_and_balanced_braces() -> None:
+    """Text checks only; the compile is test_f5_t2_dts_compiles_with_cpp_and_dtc."""
     raw = DTS_MAIN.read_text(encoding="utf-8")
     assert "/dts-v1/;" in raw
     stripped = _strip_dts_comments(raw)
@@ -243,16 +298,62 @@ def test_f5_t2_dts_i2s1_pinctrl_excludes_gpio0_b3_and_balanced_braces(tmp_path: 
     i2s1_pins = _extract_dts_block(pinctrl, r"i2s1_respeaker:\s*i2s1-respeaker")
     assert "RK_PB3" not in i2s1_pins, "i2s1_respeaker must omit GPIO0_B3 (LRCK_RX)"
 
-    dtc = shutil.which("dtc")
-    if dtc:
-        # Run dtc syntax check only if dtc is installed on host
-        res = subprocess.run(
-            [dtc, "-I", "dts", "-O", "dtb", "-o", str(tmp_path / "out.dtb"), str(DTS_MAIN)],
-            capture_output=True,
-            text=True,
-            check=False,
+
+def _dt_bindings_include_root() -> Path | None:
+    """Kernel include directory that carries dt-bindings/: the Armbian kernel worktree if it
+    has been fetched (untracked), else the headers of an installed kernel."""
+    candidates = sorted(
+        (NEWOS_DIR / "armbian-build" / "cache" / "sources" / "linux-kernel-worktree").glob(
+            "*rockchip__armhf/include"
         )
-        assert res.returncode == 0 or "FATAL ERROR" not in res.stderr
+    ) + sorted(Path("/usr/lib/modules").glob("*/build/include"))
+    for inc in candidates:
+        if (inc / "dt-bindings" / "pinctrl" / "rockchip.h").is_file():
+            return inc
+    return None
+
+
+def compile_dts(dts: Path, out_dtb: Path) -> subprocess.CompletedProcess[str]:
+    """Preprocess and compile a board dts the way newos/mk-sd-image.sh does:
+    cpp ... <dts> | dtc -I dts -O dtb -o <out> -. Skips, naming what is missing."""
+    cpp, dtc = shutil.which("cpp"), shutil.which("dtc")
+    if cpp is None:
+        pytest.skip("cpp (C preprocessor) not installed: cannot preprocess the dts")
+    if dtc is None:
+        pytest.skip("dtc (device-tree-compiler) not installed: cannot compile the dts")
+    inc = _dt_bindings_include_root()
+    if inc is None:
+        pytest.skip(
+            "dt-bindings headers not found: need newos/armbian-build/cache/sources/"
+            "linux-kernel-worktree/*rockchip__armhf/include or /usr/lib/modules/*/build/include"
+        )
+    pre = subprocess.run(
+        [cpp, "-nostdinc", "-undef", "-D__DTS__", "-x", "assembler-with-cpp",
+         "-I", str(inc), "-I", str(PORT_DIR / "ref"), str(dts)],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert pre.returncode == 0, f"cpp failed for {dts.name}: {pre.stderr}"
+    return subprocess.run(
+        [dtc, "-I", "dts", "-O", "dtb", "-o", str(out_dtb), "-"],
+        input=pre.stdout, capture_output=True, text=True, timeout=60, check=False,
+    )
+
+
+def test_f5_t2_dts_compiles_with_cpp_and_dtc(tmp_path: Path) -> None:
+    out = tmp_path / "out.dtb"
+    res = compile_dts(DTS_MAIN, out)
+    assert res.returncode == 0, f"dtc failed: {res.stderr}"
+    assert out.read_bytes()[:4] == b"\xd0\x0d\xfe\xed", "dtc output is not a flattened device tree"
+
+
+def test_f5_t2_dts_compile_check_rejects_a_broken_dts(tmp_path: Path) -> None:
+    """The compile check must be able to fail: a dts with a syntax error is rejected."""
+    broken = tmp_path / "rk3229-respeaker-v2.dts"
+    text = DTS_MAIN.read_text(encoding="utf-8")
+    assert "&i2s1 {" in text
+    broken.write_text(text.replace("&i2s1 {", "&i2s1_no_such_label {", 1), encoding="utf-8")
+    res = compile_dts(broken, tmp_path / "out.dtb")
+    assert res.returncode != 0
 
 
 def test_f5_t2_ac108_patch_rejects_already_applied_tree_b(tmp_path: Path) -> None:

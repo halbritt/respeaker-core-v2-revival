@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from conftest import BOARD_DIR, make_fake_ort
+from conftest import BOARD_DIR, free_ports, make_bounded_sleep_stub, make_fake_ort, run_bounded
 
 
 def _pcm16_frame(amp: int, samples: int = 480) -> bytes:
@@ -147,7 +147,7 @@ def test_f3_t1_transcribe_and_emit_post_whisper_and_log_jsonl(
 
 
 def test_f3_t1_event_server_sse_recent_and_bearer_auth(rsp_stt_loader, event_server_factory) -> None:
-    stt = rsp_stt_loader(env={"STT_HTTP_TOKEN": "secret-tok"})
+    stt = rsp_stt_loader(env={"STT_HTTP_TOKEN": "test-token"})
     srv, port = event_server_factory(stt)
 
     received: list[str] = []
@@ -156,7 +156,7 @@ def test_f3_t1_event_server_sse_recent_and_bearer_auth(rsp_stt_loader, event_ser
     def sse_reader() -> None:
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}/events",
-            headers={"Authorization": "Bearer secret-tok", "Accept": "text/event-stream"},
+            headers={"Authorization": "Bearer test-token", "Accept": "text/event-stream"},
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             ready.set()
@@ -186,7 +186,7 @@ def test_f3_t1_event_server_sse_recent_and_bearer_auth(rsp_stt_loader, event_ser
 
     recent_req = urllib.request.Request(
         f"http://127.0.0.1:{port}/recent",
-        headers={"Authorization": "Bearer secret-tok"},
+        headers={"Authorization": "Bearer test-token"},
     )
     with urllib.request.urlopen(recent_req, timeout=3) as resp:
         arr = json.loads(resp.read().decode("utf-8"))
@@ -524,7 +524,7 @@ def test_f3_t2_has_speech_graceful_fallback_short_audio_and_reset_run(rsp_stt_lo
 def test_f3_t2_event_server_auth_rejects_401_404_and_drops_slow_subscriber(
     rsp_stt_loader, event_server_factory
 ) -> None:
-    stt = rsp_stt_loader(env={"STT_HTTP_TOKEN": "tok123"})
+    stt = rsp_stt_loader(env={"STT_HTTP_TOKEN": "test-tok123"})
     _, port = event_server_factory(stt)
 
     with pytest.raises(urllib.error.HTTPError) as exc_401:
@@ -536,7 +536,7 @@ def test_f3_t2_event_server_auth_rejects_401_404_and_drops_slow_subscriber(
         urllib.request.urlopen(bad_tok, timeout=3)
     assert exc_wrong.value.code == 401
 
-    good_404 = urllib.request.Request(f"http://127.0.0.1:{port}/nope", headers={"Authorization": "Bearer tok123"})
+    good_404 = urllib.request.Request(f"http://127.0.0.1:{port}/nope", headers={"Authorization": "Bearer test-tok123"})
     with pytest.raises(urllib.error.HTTPError) as exc_404:
         urllib.request.urlopen(good_404, timeout=3)
     assert exc_404.value.code == 404
@@ -578,12 +578,13 @@ def test_f3_t2_rsp_record_inactive_service_zero_writes_and_sandboxed_cap_and_tim
     fake_sys = bin_dir / "systemctl"
     fake_sys.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     fake_sys.chmod(0o755)
-    (bin_dir / "sleep").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    (bin_dir / "sleep").chmod(0o755)
+    # Polling loops in rsp-record call sleep; the stub keeps them fast and bounded, and
+    # every run has a timeout, so a broken guard fails the test instead of spinning.
+    make_bounded_sleep_stub(bin_dir)
 
     # Unmodified rsp-record fails cleanly when service is inactive
     base_env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path / "home_unmod")}
-    res = subprocess.run(["sh", str(BOARD_DIR / "rsp-record"), "1", "probe"], env=base_env, capture_output=True, text=True, check=False)
+    res = run_bounded(["sh", str(BOARD_DIR / "rsp-record"), "1", "probe"], env=base_env, timeout=20)
     assert res.returncode == 1
     assert "not running" in res.stderr
 
@@ -618,7 +619,7 @@ def test_f3_t2_rsp_record_inactive_service_zero_writes_and_sandboxed_cap_and_tim
 
     # Already recording error
     (run_dir / "record.active").write_text("/tmp/existing.raw\n", encoding="utf-8")
-    res_busy = subprocess.run(["sh", str(sandbox_rec), "1", "x"], env=sb_env, capture_output=True, text=True, check=False)
+    res_busy = run_bounded(["sh", str(sandbox_rec), "1", "x"], env=sb_env, timeout=20)
     assert res_busy.returncode == 1 and "already recording" in res_busy.stderr
     (run_dir / "record.active").unlink()
 
@@ -627,7 +628,7 @@ def test_f3_t2_rsp_record_inactive_service_zero_writes_and_sandboxed_cap_and_tim
     old_jsonl = rec_dir / "20260101T000000Z-old.transcript.jsonl"
     old_raw.write_bytes(b"\x01" * 1_500_000)
     old_jsonl.write_text('{"text": "old"}\n', encoding="utf-8")
-    res_to = subprocess.run(["sh", str(sandbox_rec), "2", "captest"], env=sb_env, capture_output=True, text=True, check=False)
+    res_to = run_bounded(["sh", str(sandbox_rec), "2", "captest"], env=sb_env, timeout=20)
     assert res_to.returncode == 1 and "did not start recording" in res_to.stderr
     assert not old_raw.exists() and not old_jsonl.exists()
     assert (run_dir / "record.req").read_text(encoding="utf-8").strip() == "2 captest"
@@ -649,41 +650,15 @@ def test_f3_t2_rsp_record_inactive_service_zero_writes_and_sandboxed_cap_and_tim
 
     t = threading.Thread(target=responder, daemon=True)
     t.start()
-    res_ok = subprocess.run(["sh", str(sandbox_rec), "1", "happy"], env=sb_env, capture_output=True, text=True, check=False)
+    res_ok = run_bounded(["sh", str(sandbox_rec), "1", "happy"], env=sb_env, timeout=20)
     t.join(timeout=3)
     assert res_ok.returncode == 0, res_ok.stderr
     assert (led_dir / "trigger").read_text(encoding="utf-8").strip() == "none"
     assert (led_dir / "brightness").read_text(encoding="utf-8").strip() == "0"
 
 
-def test_f3_t2_rsp_replay_missing_env_error_and_sandboxed_override_precedence(tmp_path: Path) -> None:
-    raw = tmp_path / "take.raw"
-    raw.write_bytes(b"\x00" * 64)
-
-    # Unmodified rsp-replay fails cleanly if /etc/default/rsp-stt is absent on host
-    if not Path("/etc/default/rsp-stt").exists():
-        res_unmod = subprocess.run(
-            ["sh", str(BOARD_DIR / "rsp-replay"), str(raw)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert res_unmod.returncode != 0
-
-    # Sandboxed copy rewriting /etc/default/rsp-stt paths to tmp_path
-    env_file = tmp_path / "rsp-stt.env"
-    env_file.write_text((BOARD_DIR / "rsp-stt.env").read_text(encoding="utf-8"), encoding="utf-8")
-    local_env = tmp_path / "rsp-stt.local"
-    sandbox_replay = tmp_path / "rsp-replay"
-    sandbox_replay.write_text(
-        (BOARD_DIR / "rsp-replay")
-        .read_text(encoding="utf-8")
-        .replace("/etc/default/rsp-stt.local", str(local_env))
-        .replace("/etc/default/rsp-stt", str(env_file)),
-        encoding="utf-8",
-    )
-    sandbox_replay.chmod(0o755)
-
+def _replay_env_probe(tmp_path: Path) -> tuple[Path, Path]:
+    """A stand-in for rsp-stt.py that records the STT_* environment rsp-replay gives it."""
     stub_stt = tmp_path / "stub_stt.py"
     captured_env = tmp_path / "captured.json"
     stub_stt.write_text(
@@ -695,19 +670,44 @@ def test_f3_t2_rsp_replay_missing_env_error_and_sandboxed_override_precedence(tm
         "open(os.environ['STT_LOG'], 'w').write('{\"text\": \"ok\"}\\n')\n",
         encoding="utf-8",
     )
+    return stub_stt, captured_env
+
+
+def test_f3_t2_rsp_replay_missing_defaults_error_and_env_override_precedence(tmp_path: Path) -> None:
+    raw = tmp_path / "take.raw"
+    raw.write_bytes(b"\x00" * 64)
+
+    # No <defaults dir>/rsp-stt: the script stops with an error and runs nothing
+    empty = tmp_path / "empty-defaults"
+    empty.mkdir()
+    stub_stt, captured_env = _replay_env_probe(tmp_path)
+    res_missing = run_bounded(
+        ["sh", str(BOARD_DIR / "rsp-replay"), str(raw)],
+        env={"PATH": "/usr/bin:/bin", "RSP_DEFAULTS_DIR": str(empty), "RSP_STT": str(stub_stt)},
+        timeout=20,
+    )
+    assert res_missing.returncode != 0
+    assert not captured_env.exists()
+
+    defaults = tmp_path / "defaults"
+    defaults.mkdir()
+    (defaults / "rsp-stt").write_text((BOARD_DIR / "rsp-stt.env").read_text(encoding="utf-8"), encoding="utf-8")
+    track, audio, sep = free_ports(3)
 
     custom_odas = tmp_path / "fake-odaslive"
-    res = subprocess.run(
-        ["sh", str(sandbox_replay), str(raw), str(custom_odas)],
+    res = run_bounded(
+        ["sh", str(BOARD_DIR / "rsp-replay"), str(raw), str(custom_odas)],
         env={
             "PATH": "/usr/bin:/bin",
             "PYTHONDONTWRITEBYTECODE": "1",
+            "RSP_DEFAULTS_DIR": str(defaults),
+            "RSP_REPLAY_TRACK_PORT": str(track),
+            "RSP_REPLAY_AUDIO_PORT": str(audio),
+            "RSP_REPLAY_SEP_PORT": str(sep),
             "RSP_STT": str(stub_stt),
             "STT_SERVER": "http://127.0.0.1:7777/inference",
         },
-        capture_output=True,
-        text=True,
-        check=False,
+        timeout=20,
     )
     assert res.returncode == 0, res.stderr
     assert "skip-bracket" not in res.stdout
@@ -716,16 +716,83 @@ def test_f3_t2_rsp_replay_missing_env_error_and_sandboxed_override_precedence(tm
     assert "wrote " in res.stdout and "(1 transcripts)" in res.stdout
 
     env_seen = json.loads(captured_env.read_text(encoding="utf-8"))
-    assert env_seen["STT_SERVER"] == "http://127.0.0.1:7777/inference"
+    assert env_seen["STT_SERVER"] == "http://127.0.0.1:7777/inference"     # environment beats the file
+    assert env_seen["STT_LANGUAGE"] == "en"                                # from the defaults file
     assert env_seen["STT_ODAS_BIN"] == str(custom_odas)
     assert env_seen["STT_SOURCE"] == "odas"
     assert env_seen["STT_ODAS_INPUT"] == str(raw.resolve())
+    assert (env_seen["STT_ODAS_TRACK_PORT"], env_seen["STT_ODAS_AUDIO_PORT"], env_seen["STT_ODAS_SEP_PORT"]) == (
+        str(track),
+        str(audio),
+        str(sep),
+    )
+    assert not Path(env_seen["STT_RUN_DIR"]).exists()
+
+
+def test_f3_t2_rsp_replay_default_ports_stay_clear_of_the_live_service(tmp_path: Path) -> None:
+    raw = tmp_path / "take.raw"
+    raw.write_bytes(b"\x00" * 64)
+    defaults = tmp_path / "defaults"
+    defaults.mkdir()
+    # even if the site file pins the live service's ports, a replay must not reuse them
+    (defaults / "rsp-stt").write_text(
+        "STT_SERVER=http://whisper.example:8910/inference\nSTT_ODAS_TRACK_PORT=9000\n", encoding="utf-8"
+    )
+    stub_stt, captured_env = _replay_env_probe(tmp_path)
+    res = run_bounded(
+        ["sh", str(BOARD_DIR / "rsp-replay"), str(raw)],
+        env={"PATH": "/usr/bin:/bin", "RSP_DEFAULTS_DIR": str(defaults), "RSP_STT": str(stub_stt)},
+        timeout=20,
+    )
+    assert res.returncode == 0, res.stderr
+    env_seen = json.loads(captured_env.read_text(encoding="utf-8"))
     assert (env_seen["STT_ODAS_TRACK_PORT"], env_seen["STT_ODAS_AUDIO_PORT"], env_seen["STT_ODAS_SEP_PORT"]) == (
         "9100",
         "9102",
         "9103",
     )
-    assert not Path(env_seen["STT_RUN_DIR"]).exists()
+
+
+def test_f3_t2_rsp_replay_site_overrides_file_is_read_after_the_defaults(tmp_path: Path) -> None:
+    """<defaults dir>/rsp-stt.local wins over rsp-stt; the environment wins over both."""
+    raw = tmp_path / "take.raw"
+    raw.write_bytes(b"\x00" * 64)
+    defaults = tmp_path / "defaults"
+    defaults.mkdir()
+    (defaults / "rsp-stt").write_text(
+        "STT_SERVER=http://base.example:8910/inference\nSTT_LANGUAGE=en\nSTT_END_SILENCE_MS=1500\n",
+        encoding="utf-8",
+    )
+    (defaults / "rsp-stt.local").write_text(
+        "STT_SERVER=http://site.example:8910/inference\nSTT_LANGUAGE=de\nSTT_ODAS_IGNORE=308:20\n",
+        encoding="utf-8",
+    )
+    stub_stt, captured_env = _replay_env_probe(tmp_path)
+    base_env = {"PATH": "/usr/bin:/bin", "RSP_DEFAULTS_DIR": str(defaults), "RSP_STT": str(stub_stt)}
+
+    res = run_bounded(["sh", str(BOARD_DIR / "rsp-replay"), str(raw)], env=base_env, timeout=20)
+    assert res.returncode == 0, res.stderr
+    seen = json.loads(captured_env.read_text(encoding="utf-8"))
+    assert seen["STT_SERVER"] == "http://site.example:8910/inference"
+    assert seen["STT_LANGUAGE"] == "de"
+    assert seen["STT_ODAS_IGNORE"] == "308:20"
+    assert seen["STT_END_SILENCE_MS"] == "1500"          # only in the defaults file
+
+    res = run_bounded(
+        ["sh", str(BOARD_DIR / "rsp-replay"), str(raw)], env={**base_env, "STT_LANGUAGE": "fr"}, timeout=20
+    )
+    assert res.returncode == 0, res.stderr
+    seen = json.loads(captured_env.read_text(encoding="utf-8"))
+    assert seen["STT_LANGUAGE"] == "fr"
+    assert seen["STT_SERVER"] == "http://site.example:8910/inference"
+
+    # without a site file the defaults apply
+    (defaults / "rsp-stt.local").unlink()
+    res = run_bounded(["sh", str(BOARD_DIR / "rsp-replay"), str(raw)], env=base_env, timeout=20)
+    assert res.returncode == 0, res.stderr
+    seen = json.loads(captured_env.read_text(encoding="utf-8"))
+    assert seen["STT_SERVER"] == "http://base.example:8910/inference"
+    assert "STT_ODAS_IGNORE" not in seen
 
 
 def test_f3_t2_board_config_and_service_invariants() -> None:
@@ -746,3 +813,34 @@ def test_f3_t2_board_config_and_service_invariants() -> None:
     env_txt = (BOARD_DIR / "rsp-stt.env").read_text(encoding="utf-8")
     assert "STT_ODAS_CFG=/opt/rsp-stt/odas-respeaker-core-v2.cfg" in env_txt
     assert "STT_SOURCE=odas" in env_txt
+
+
+def test_f3_t2_rsp_replay_keeps_environment_overrides_that_contain_spaces(tmp_path: Path) -> None:
+    """An STT_* override such as a phrase list has spaces and shell characters in it."""
+    raw = tmp_path / "take.raw"
+    raw.write_bytes(b"\x00" * 64)
+    defaults = tmp_path / "defaults"
+    defaults.mkdir()
+    (defaults / "rsp-stt").write_text((BOARD_DIR / "rsp-stt.env").read_text(encoding="utf-8"), encoding="utf-8")
+    stub_stt, captured_env = _replay_env_probe(tmp_path)
+    track, audio, sep = free_ports(3)
+    phrases = "thank you.|bye for now.|it's $HOME; \"quoted\""
+    res = run_bounded(
+        ["sh", str(BOARD_DIR / "rsp-replay"), str(raw)],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "RSP_DEFAULTS_DIR": str(defaults),
+            "RSP_REPLAY_TRACK_PORT": str(track),
+            "RSP_REPLAY_AUDIO_PORT": str(audio),
+            "RSP_REPLAY_SEP_PORT": str(sep),
+            "RSP_STT": str(stub_stt),
+            "STT_NOISE_PHRASES": phrases,
+            "STT_LANGUAGE": "de",
+        },
+        timeout=20,
+    )
+    assert res.returncode == 0, res.stderr
+    env_seen = json.loads(captured_env.read_text(encoding="utf-8"))
+    assert env_seen["STT_NOISE_PHRASES"] == phrases
+    assert env_seen["STT_LANGUAGE"] == "de"            # still beats the defaults file

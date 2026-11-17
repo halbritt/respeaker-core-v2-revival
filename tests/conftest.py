@@ -13,6 +13,9 @@ import importlib.machinery  # noqa: E402
 import importlib.util  # noqa: E402
 import json  # noqa: E402
 import queue  # noqa: E402
+import shutil  # noqa: E402
+import signal  # noqa: E402
+import socket  # noqa: E402
 import socketserver  # noqa: E402
 import subprocess  # noqa: E402
 import threading  # noqa: E402
@@ -25,8 +28,11 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BOARD_DIR = REPO_ROOT / "board"
+# RSP_TEST_BOARD_DIR points the suite at another copy of board/. It exists for mutation
+# checks: break a scratch copy and confirm the test for that behaviour goes red.
+BOARD_DIR = Path(os.environ.get("RSP_TEST_BOARD_DIR") or REPO_ROOT / "board").resolve()
 NEWOS_DIR = REPO_ROOT / "newos"
+BUSYBOX_HOST = Path("/usr/bin/busybox")
 
 
 @functools.lru_cache(maxsize=1)
@@ -43,6 +49,99 @@ def unshare_available() -> bool:
         return res.returncode == 0
     except OSError:
         return False
+
+
+def chroot_prereq_missing() -> str:
+    """What the chroot-based boot tests lack on this host; empty when nothing is missing."""
+    missing = []
+    if not unshare_available():
+        missing.append("unprivileged user namespaces (`unshare -Ur true` fails or unshare is not installed)")
+    if not BUSYBOX_HOST.is_file():
+        missing.append(f"a static busybox at {BUSYBOX_HOST}")
+    return "missing on this host: " + " and ".join(missing) if missing else ""
+
+
+def free_ports(n: int) -> list[int]:
+    """n distinct free localhost TCP ports. All n sockets are held open until every port
+    is chosen, so the ports differ from each other; another process can still take one
+    between this call and its use (the programs under test cannot be told to bind port 0)."""
+    socks = []
+    try:
+        for _ in range(n):
+            s = socket.socket()
+            s.bind(("127.0.0.1", 0))
+            socks.append(s)
+        return [int(s.getsockname()[1]) for s in socks]
+    finally:
+        for s in socks:
+            s.close()
+
+
+def kill_group(proc: subprocess.Popen) -> None:
+    """End a child started with start_new_session=True together with everything it started."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            break
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            continue
+        # the leader is gone; make sure no descendant of its group lingers
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        break
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    for stream in (proc.stdout, proc.stderr, proc.stdin):
+        if stream is not None:
+            stream.close()
+
+
+def run_bounded(
+    cmd: list[str], *, timeout: float, env: dict[str, str] | None = None, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    """subprocess.run for scripts under test: own process group, a timeout, and the whole
+    group killed afterwards whatever happened. A timeout fails the test."""
+    proc = subprocess.Popen(
+        cmd, env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"{' '.join(map(str, cmd[:3]))} ... still running after {timeout}s (runaway loop?)")
+    finally:
+        kill_group(proc)
+
+
+def make_bounded_sleep_stub(bin_dir: Path, limit: int = 400) -> Path:
+    """A `sleep` for PATH that returns almost at once, so polling loops in the scripts
+    under test run quickly, but ends the calling script after `limit` calls so that a
+    loop which never finishes fails the test instead of spinning."""
+    real = shutil.which("sleep")
+    if real is None:
+        pytest.skip("sleep not installed")
+    counter = bin_dir / ".sleep-calls"
+    stub = bin_dir / "sleep"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"n=$(cat {str(counter)!r} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {str(counter)!r}\n"
+        f"if [ $n -gt {limit} ]; then\n"
+        f"  echo 'stub sleep: more than {limit} calls, ending the runaway caller' >&2\n"
+        "  kill -TERM $PPID; exit 1\n"
+        "fi\n"
+        f"exec {real} 0.005\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return stub
 
 
 def make_fake_ort(probs: float | Iterable[float] = 0.95) -> types.ModuleType:
