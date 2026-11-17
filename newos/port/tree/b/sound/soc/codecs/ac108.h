@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * ac108.h --  ac108 ALSA Soc Audio driver
  *
@@ -698,7 +699,7 @@
 #define GPIO4_SELECT			4
 #define GPIO3_SELECT			0
 
-/*GPIO_DAT*///order???
+/* GPIO_DAT (order?) */
 #define GPIO4_DAT				3
 #define GPIO3_DAT				2
 #define GPIO2_DAT				1
@@ -722,13 +723,13 @@
 #define GPIO2_EINT_CFG			2
 #define GPIO1_EINT_CFG			0
 
-/*GPIO_INT_EN*///order???
+/* GPIO_INT_EN (order?) */
 #define GPIO4_EINT_EN			3
 #define GPIO3_EINT_EN			2
 #define GPIO2_EINT_EN			1
 #define GPIO1_EINT_EN			0
 
-/*GPIO_INT_STATUS*///order???
+/* GPIO_INT_STATUS (order?) */
 #define GPIO4_EINT_STA			3
 #define GPIO3_EINT_STA			2
 #define GPIO2_EINT_STA			1
@@ -807,4 +808,3 @@
 
 
 #endif
-
