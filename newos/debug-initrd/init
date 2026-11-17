@@ -293,7 +293,7 @@ i=0
 while :; do
 	[ -s "$R/sdlogdir" ] && dump "$(cat "$R/sdlogdir")" "$i"
 	# after ~50 s move on: next stage from /sd/boot/stages ("<dtb> <extra cmdline>" per line),
-	# or hand the board back to the eMMC system when none is left (bringup mode). touch /stay to hold.
+	# or hand the board back to the eMMC system when none is left. touch /stay to hold.
 	if [ $i -ge 25 ] && [ ! -e "$R/stay" ] && [ "$sd_mounted" = "1" ]; then
 		[ -s "$R/sdlogdir" ] && dump "$(cat "$R/sdlogdir")" final
 		next=$(head -n1 "$R/sd/boot/stages" 2>/dev/null)
@@ -302,7 +302,9 @@ while :; do
 			set -- $next; d=$1; shift
 			sed -i -e "s|^dtb=.*|dtb=$d|" -e "s|^cmdline=.*|cmdline=$BASECMD $*|" "$R/sd/boot/uEnv.txt"
 			[ -s "$R/sdlogdir" ] && echo "$next" > "$(cat "$R/sdlogdir")/next-stage.txt"
-		elif [ "$SAFETY_PROFILE" = "bringup" ]; then
+		else
+			# No stage left and no rspboot: hand back in every profile. Leaving the
+			# card armed here would bring the board straight back, forever.
 			mv "$R/sd/boot/uEnv.txt" "$R/sd/boot/uEnv.txt.done"
 		fi
 		sync; umount "$R/sd"; { echo rsp-clean-reboot >> "$R/dev/kmsg"; sleep 1; reboot -f; exit 0; }
