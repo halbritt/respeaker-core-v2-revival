@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""rsp-leds - show on the LED ring where speech is coming from.
+
+Reads the event stream of rsp-stt (GET /events) and drives the twelve APA102 LEDs of the
+ReSpeaker Core v2 over SPI. Standard library only.
+
+  rsp-leds                                   # /dev/spidev0.0, events from 127.0.0.1:8911
+
+  speaking        blue pointer towards the talker (whole ring dim if the direction is unknown)
+  transcribing    amber pointer, for at most --wait seconds
+  transcript in   green pointer for --flash seconds
+  otherwise       dark, also when the event stream is lost or the program stops
+
+The ring needs its supply switched on first: GPIO2_A2 (gpiochip2 line 2) low, which the
+rsp-led-power service does. LED 0 sits at Mic 2 (azimuth 330) and the numbers run
+clockwise seen from above, 30 degrees apart.
+"""
+import argparse, fcntl, json, os, queue, signal, stat, struct, sys, threading, time, urllib.request
+
+N = 12
+OFF = [(0, 0, 0)] * N
+LISTENING = (0, 60, 255)        # blue-cyan while someone is speaking
+WORKING = (255, 90, 0)         # amber while the utterance is being transcribed
+HEARD = (0, 255, 40)           # green when the transcript has arrived
+DIM = (0, 6, 24)               # whole ring, when the direction is not known
+
+def led_at(az):
+    """Index of the LED nearest to an azimuth in degrees."""
+    return int((330 - az) % 360 / 30.0 + 0.5) % N
+
+class Ring:
+    def __init__(self, path, brightness):
+        self.fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+        self.brightness = max(1, min(31, brightness))
+        if stat.S_ISCHR(os.fstat(self.fd).st_mode):
+            fcntl.ioctl(self.fd, 0x40046b04, struct.pack("<I", 4000000))   # SPI_IOC_WR_MAX_SPEED_HZ
+            fcntl.ioctl(self.fd, 0x40016b01, struct.pack("<B", 0))         # SPI_IOC_WR_MODE
+
+    def show(self, pixels):
+        """pixels: twelve (r, g, b), 0..255."""
+        data = bytearray(4)
+        for r, g, b in pixels:
+            data += bytes([0xE0 | (self.brightness if (r or g or b) else 0), b, g, r])
+        data += b"\xff" * 4 + b"\x00" * 4
+        os.write(self.fd, bytes(data))
+
+def pointer(az, colour):
+    """A lit LED at the direction with a dimmer one on each side."""
+    px = [(0, 0, 0)] * N
+    c = led_at(az)
+    px[c] = colour
+    side = tuple(v // 6 for v in colour)
+    px[(c - 1) % N] = px[(c + 1) % N] = side
+    return px
+
+def events(url, token):
+    """Yield (event, data) from the stream until it ends."""
+    req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})
+    if token:
+        req.add_header("Authorization", "Bearer " + token)
+    with urllib.request.urlopen(req, timeout=60) as r:
+        kind, data = None, []
+        for line in r:
+            line = line.decode("utf-8", "replace").rstrip("\n")
+            if line.startswith("event:"):
+                kind = line[6:].strip()
+            elif line.startswith("data:"):
+                data.append(line[5:].strip())
+            elif not line and data:
+                yield kind, json.loads("\n".join(data))
+                kind, data = None, []
+
+def reader(url, token, retry, q):
+    """Feed events into q; ("lost", None) whenever the stream ends, then reconnect."""
+    while True:
+        try:
+            for item in events(url, token):
+                q.put(item)
+        except Exception:
+            pass
+        q.put(("lost", None))
+        time.sleep(retry)
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    # defaults follow the speech service's own settings (STT_HTTP, STT_HTTP_TOKEN)
+    p.add_argument("--url", default=os.environ.get("RSP_EVENTS") or
+                   "http://%s/events" % (os.environ.get("STT_HTTP") or "127.0.0.1:8911"))
+    p.add_argument("--token", default=os.environ.get("RSP_TOKEN") or os.environ.get("STT_HTTP_TOKEN", ""))
+    p.add_argument("--device", default="/dev/spidev0.0")
+    p.add_argument("--brightness", type=int, default=4, help="1..31, the ring's global brightness")
+    p.add_argument("--wait", type=float, default=8, help="seconds to show 'working' while waiting for the transcript")
+    p.add_argument("--flash", type=float, default=0.6, help="seconds the confirmation stays on")
+    p.add_argument("--retry", type=float, default=3, help="seconds between attempts to reach the event stream")
+    a = p.parse_args()
+    ring = Ring(a.device, a.brightness)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    q = queue.Queue()
+    threading.Thread(target=reader, args=(a.url, a.token, a.retry, q), daemon=True).start()
+    dark_at = None                # when the current display expires; None = stays until an event
+    try:
+        while True:
+            try:
+                left = None if dark_at is None else max(0.0, dark_at - time.monotonic())
+                kind, d = q.get(timeout=left)
+            except queue.Empty:
+                ring.show(OFF); dark_at = None
+                continue
+            if kind == "speech_start":
+                ring.show(pointer(d["az"], LISTENING) if "az" in d else [DIM] * N)
+                dark_at = None
+            elif kind == "speech_end":
+                if d.get("sent"):
+                    ring.show(pointer(d["az"], WORKING) if "az" in d else [DIM] * N)
+                    dark_at = time.monotonic() + a.wait
+                else:
+                    ring.show(OFF); dark_at = None
+            elif kind == "utterance":
+                ring.show(pointer(d["az"], HEARD) if "az" in d else [tuple(v // 8 for v in HEARD)] * N)
+                dark_at = time.monotonic() + a.flash
+            elif kind == "lost":
+                ring.show(OFF); dark_at = None
+    finally:
+        ring.show(OFF)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

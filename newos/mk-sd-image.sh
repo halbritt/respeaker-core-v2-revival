@@ -296,7 +296,14 @@ install -m 755 "$HERE/../board/rsp-stt.py" "$R/opt/rsp-stt/rsp-stt.py"
 install -m 644 "$HERE/../board/odas-respeaker-core-v2.cfg" "$R/opt/rsp-stt/"
 install -m 644 "$HERE/../board/rsp-stt.env" "$R/etc/default/rsp-stt"
 install -m 644 "$HERE/../board/rsp-stt.service" "$R/etc/systemd/system/rsp-stt.service"
-install -m 755 "$HERE/../board/rsp-record" "$HERE/../board/rsp-replay" "$HERE/../board/rsp-listen" "$R/usr/local/bin/"
+install -m 755 "$HERE/../board/rsp-record" "$HERE/../board/rsp-replay" "$HERE/../board/rsp-listen" \
+	"$HERE/../board/rsp-leds" "$R/usr/local/bin/"
+# LED ring: supply switch, write access for the service user, direction display
+install -m 644 "$HERE/../board/rsp-leds.service" "$HERE/../board/rsp-led-power.service" "$R/etc/systemd/system/"
+install -D -m 644 "$HERE/../board/60-rsp-leds.rules" "$R/etc/udev/rules.d/60-rsp-leds.rules"
+for u in rsp-leds rsp-led-power; do
+	ln -sf /etc/systemd/system/$u.service "$R/etc/systemd/system/multi-user.target.wants/$u.service"
+done
 # site settings (not in the repository): at least STT_SERVER=http://<whisper host>:8910/inference
 [[ -n "${STT_SERVER:-}" ]] && echo "STT_SERVER=$STT_SERVER" > "$R/etc/default/rsp-stt.local"
 ODAS=$HERE/cross/out/odas-stock      # built by cross/cross.sh ./build-odas.sh
@@ -330,7 +337,7 @@ cat > "$R/usr/local/sbin/rsp-firstboot" <<'EOF'
 set -e
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-apt-get install -y -q --no-install-recommends python3-numpy python3-onnxruntime alsa-utils libfftw3-single3 libconfig11 libpulse0 libasound2t64
+apt-get install -y -q --no-install-recommends python3-numpy python3-onnxruntime gpiod alsa-utils libfftw3-single3 libconfig11 libpulse0 libasound2t64
 for i in 1 2 3 4 5 6; do amixer -q -c 0 sset "ADC$i PGA gain" 24; done
 alsactl store
 systemctl enable --now rsp-stt.service

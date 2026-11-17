@@ -1,0 +1,2 @@
+# LED ring (APA102 on SPI0): let the service user write to it
+SUBSYSTEM=="spidev", KERNEL=="spidev0.0", GROUP="respeaker", MODE="0660"

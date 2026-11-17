@@ -25,7 +25,7 @@ Status: works on one board. Not yet rebuilt from scratch end to end; see "Known 
 
 | Path | Contents |
 |---|---|
-| `board/` | Runtime: `rsp-stt.py`, its settings and unit, the ODAS config, `rsp-record`, `rsp-replay`, `rsp-listen` |
+| `board/` | Runtime: `rsp-stt.py`, its settings and unit, the ODAS config, `rsp-record`, `rsp-replay`, `rsp-listen`, `rsp-leds` |
 | `newos/port/` | Board device tree, AC108 driver port and kernel patch, reference sources |
 | `newos/mk-sd-image.sh` | Assembles the SD image from an Armbian rootfs plus our kernel, dtb and services |
 | `newos/overlay/`, `newos/debug-initrd/` | Boot safety net and bring-up tools |
@@ -118,6 +118,21 @@ rsp-listen --name computer --strip-wake -- ./my-agent   # utterance JSON on stdi
 Matching is done on the transcript, so it needs no model on the board, but everything said
 in the room is still transcribed first.
 
+### LED ring
+
+`rsp-leds` (service `rsp-leds`) reads the same event stream and drives the twelve APA102
+LEDs over SPI:
+
+| State | Ring |
+|---|---|
+| Someone is speaking | Blue pointer towards the talker (whole ring dim if the direction is unknown) |
+| Utterance being transcribed | Amber pointer, for at most 8 s |
+| Transcript arrived | Green pointer for 0.6 s |
+| Otherwise | Dark, also when the speech service is down |
+
+The ring's supply is switched by GPIO2_A2 (low = on), held by the `rsp-led-power` service.
+LED 0 is at Mic 2 (azimuth 330) and the numbers run clockwise seen from above.
+
 ## ODAS
 
 Built from introlab/odas commit 004cb82 plus `newos/cross/patches/`, which
@@ -200,8 +215,8 @@ the command line means `bringup`.
   running board was brought up step by step.
 - The new OS runs from the SD card. The eMMC works under 6.18 (clock limited to 37.5 MHz),
   but installing to it is not scripted.
-- Playback (the on-chip DAC), echo cancellation, a local wake-word model and the LED ring
-  are not set up. The loopback channels are captured but unused.
+- Playback (the on-chip DAC), echo cancellation and a local wake-word model are not set up.
+  The loopback channels are captured but unused.
 - The kernel's USB PHY use-after-free (see above) is worked around in the device tree; a fix
   for the driver is in `newos/port/patches/` and has not been sent upstream.
 - Mic gain is 24 dB: at 28 dB a talker close to the board peaked at -0.8 dBFS. Not calibrated further.

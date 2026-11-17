@@ -1,0 +1,15 @@
+[Unit]
+Description=ReSpeaker LED ring: direction of speech (events from rsp-stt)
+After=rsp-stt.service rsp-led-power.service
+Wants=rsp-led-power.service
+
+[Service]
+User=respeaker
+EnvironmentFile=-/etc/default/rsp-stt
+EnvironmentFile=-/etc/default/rsp-stt.local
+ExecStart=/usr/bin/python3 -u /usr/local/bin/rsp-leds
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

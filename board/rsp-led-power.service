@@ -1,0 +1,9 @@
+[Unit]
+Description=ReSpeaker LED ring supply (GPIO2_A2 low while this runs)
+
+[Service]
+ExecStart=/usr/bin/gpioset -c gpiochip2 2=0
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
