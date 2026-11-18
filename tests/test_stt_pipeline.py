@@ -363,3 +363,14 @@ def test_long_utterance_that_whisper_returns_empty_is_logged(rsp_stt_loader, mon
     _script_transcripts(monkeypatch, stt, [""])
     stt.handle([_pcm(5.0)], {"t": 9.0, "az": 90})
     assert re.search(r"drop: .*5\.0s.*empty transcript", capsys.readouterr().out)
+
+
+def test_odas_runs_sequentially_unless_told_otherwise(rsp_stt_loader) -> None:
+    """Measured on the board: odaslive's own threads cost a third of its CPU time in wake-ups.
+    With -s it gave the same transcripts on a ten-minute take for 42% less CPU."""
+    stt = rsp_stt_loader()
+    cmd = stt.odas_command("/run/x.cfg")
+    assert cmd[0] == stt.ODAS_BIN and cmd[-2:] == ["-c", "/run/x.cfg"]
+    assert "-s" in cmd
+    threaded = rsp_stt_loader(env={"STT_ODAS_ARGS": ""})
+    assert threaded.odas_command("/run/x.cfg") == [threaded.ODAS_BIN, "-c", "/run/x.cfg"]

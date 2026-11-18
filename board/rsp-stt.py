@@ -65,6 +65,7 @@ WEBHOOK   = env("STT_WEBHOOK", "")
 DEBUG     = env("STT_DEBUG", "0") == "1"
 SOURCE    = env("STT_SOURCE", "arecord")
 ODAS_BIN  = env("STT_ODAS_BIN", "/opt/odas/bin/odaslive")
+ODAS_ARGS = env("STT_ODAS_ARGS", "-s")   # -s: one thread; its own threads cost a third of its CPU in wake-ups
 ODAS_CFG  = env("STT_ODAS_CFG", "/opt/rsp-stt/odas-respeaker-core-v2.cfg")
 ODAS_AUDIO_PORT = env("STT_ODAS_AUDIO_PORT", 9002, int)   # "postfiltered" sink in the cfg
 ODAS_TRACK_PORT = env("STT_ODAS_TRACK_PORT", 9000, int)   # "tracked" sink in the cfg
@@ -818,6 +819,9 @@ def capture_to(fifo):
                 os.unlink(active)
                 log("record: done")
 
+def odas_command(cfg):
+    return [ODAS_BIN] + ODAS_ARGS.split() + ["-c", cfg]
+
 def run_odas():
     """odaslive connects out to its sinks, so listen first, then start it."""
     if not os.path.isdir(RUN_DIR):
@@ -835,7 +839,7 @@ def run_odas():
     audio_srv, track_srv = listen(ODAS_AUDIO_PORT), listen(ODAS_TRACK_PORT)
     sep_srv = listen(ODAS_SEP_PORT)
     # ODAS reports fatal errors on stdout; keep them (they land in the journal)
-    proc = subprocess.Popen([ODAS_BIN, "-c", cfg], stdout=sys.stderr)
+    proc = subprocess.Popen(odas_command(cfg), stdout=sys.stderr)
     if not ODAS_INPUT:
         threading.Thread(target=capture_to, args=(source,), daemon=True).start()
     for srv in (audio_srv, track_srv, sep_srv):

@@ -221,7 +221,10 @@ Built from introlab/odas commit 004cb82 plus `newos/cross/patches/`, which
 `board/odas-respeaker-core-v2.cfg` also sets each mic's angle to 180 degrees so low sources
 are not masked. Build with `newos/cross/cross.sh ./build-odas.sh` and install the resulting
 `bin/` and `lib/` under `/opt/odas`. Compiler tuning for the Cortex-A7 made no measurable
-difference. `odaslive` uses 60-80% of one core.
+difference. `rsp-stt` starts `odaslive -s` (one thread): its own threads spent a third of
+their CPU time waking each other. On a ten-minute take that gave the same transcripts for 42%
+less CPU; live it uses about 50% of one core where the threaded one used 80-100%
+(`STT_ODAS_ARGS=` brings the threads back).
 
 ## OS image
 
