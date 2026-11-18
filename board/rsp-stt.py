@@ -124,9 +124,10 @@ class EchoCanceller:
 
     The card's channels after the microphones are a loopback of what the speaker plays. One
     adaptive filter per microphone (libspeexdsp) learns how that reaches the microphone and
-    subtracts it. Blocks are passed through untouched while the loopback is silent, so
+    subtracts it. Blocks are passed through untouched while the loopback is idle, so
     normal listening costs nothing and cannot be altered by this."""
     FRAME, TAIL, HOLD = 160, 1600, 10          # 10 ms frames, 100 ms of room, blocks kept active after
+    QUIET = 12                                 # the idle loopback is noise of up to 3 of these 16-bit steps
 
     def __init__(self):
         import ctypes, ctypes.util
@@ -149,8 +150,8 @@ class EchoCanceller:
 
     def process(self, raw):
         a = np.frombuffer(raw, dtype="<i4").reshape(-1, CHANNELS)
-        ref = a[:, MICS:].sum(axis=1, dtype=np.int64)
-        if ref.any():
+        ref = a[:, MICS:].sum(axis=1, dtype=np.int64) >> 13
+        if np.abs(ref).max() > self.QUIET:
             self.hold = self.HOLD
         elif self.hold > 0:
             self.hold -= 1                      # the room rings on after the speaker stops
@@ -163,7 +164,7 @@ class EchoCanceller:
             PLAYED.add(None)
             return raw
         # the loopback is quiet: 16-bit with 12 dB of gain; the filter adapts to any level
-        play = np.ascontiguousarray(np.clip(ref >> 13, -32768, 32767).astype(np.int16))
+        play = np.ascontiguousarray(np.clip(ref, -32768, 32767).astype(np.int16))
         PLAYED.add(play)
         out = a.copy()
         cleaned = np.zeros(self.FRAME, np.int16)

@@ -84,6 +84,32 @@ def test_audio_passes_untouched_bit_for_bit_while_the_speaker_is_silent(rsp_stt_
     assert not c.active
 
 
+def test_the_idle_noise_of_the_loopback_channels_does_not_start_the_canceller(rsp_stt_loader) -> None:
+    """Measured on the board: with the speaker idle the loopback is not zero but a few steps of
+    noise (up to 28672 of 2**31 per two channels). Treating that as playback kept the canceller,
+    and most of a CPU core, busy all the time."""
+    stt = rsp_stt_loader()
+    talk = _speechlike(3, seed=2, level=0.05)
+    raw = bytearray(_raw([talk * (1 + 0.1 * c) for c in range(6)], np.zeros(len(talk))))
+    a = np.frombuffer(raw, dtype="<i4").reshape(-1, CH)
+    a[:, 6:] = np.random.default_rng(7).integers(-3, 4, (len(a), 2)) * 4096
+    raw = bytes(raw)
+    c = stt.EchoCanceller()
+    step = BLOCK * CH * 4
+    for i in range(0, len(raw) - step + 1, step):
+        assert c.process(raw[i : i + step]) == raw[i : i + step]
+    assert not c.active
+
+
+def test_quiet_playback_still_starts_the_canceller(rsp_stt_loader) -> None:
+    """The loopback follows the hardware volume; 40 dB below a normal level must still count."""
+    stt = rsp_stt_loader()
+    ref = _speechlike(2, seed=8, level=0.0008)
+    c = stt.EchoCanceller()
+    _run(c, _raw([_room(ref, 12, 6.0)] * 6, ref))
+    assert c.active
+
+
 def test_a_talker_is_kept_while_the_speaker_plays(rsp_stt_loader) -> None:
     """Barge-in: someone speaking over the board's own voice must come through."""
     stt = rsp_stt_loader()
