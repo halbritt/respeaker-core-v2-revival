@@ -52,9 +52,10 @@ arecord (8 ch, 16 kHz, S32) --> rsp-aec --FIFO--> odaslive --+-- tracked sources
 - `rsp-stt` owns the sound card and feeds ODAS through a FIFO, so it can save the raw capture
   while transcription carries on, and a capture overrun does not end the pipeline.
 - On the way, `rsp-aec` high-passes the microphones at 120 Hz and removes the board's own
-  speaker (see "Not hearing itself"). The filter is there because ODAS localises mains hum
-  and appliance rumble very well: with a steady hum in the room (strongest at 60-140 Hz) it
-  tracked the appliance as a talker and produced a 12-second non-speech "utterance" about
+  speaker (see "Not hearing itself"). The filter is there because ODAS localises steady
+  low-frequency sound very well: with brown noise playing in the room from another speaker
+  (a sleep sound; at the microphones it was strongest at 60-140 Hz, and is called "the hum"
+  below) it tracked that speaker as a talker and produced a 12-second non-speech "utterance" about
   four times a minute, each lighting the LED ring and costing a pass of the speech gate.
   With the filter there were none in ten minutes with the same hum. `STT_AEC_ARGS="--highpass 0"`
   turns it off. Recorded speech with that hum added, replayed five times at different

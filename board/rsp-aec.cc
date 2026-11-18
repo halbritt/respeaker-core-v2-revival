@@ -11,9 +11,9 @@
 // Two things happen to the microphones:
 //
 // 1. A high-pass filter (--highpass HZ, default 120, 0 = off; fourth-order Butterworth).
-//    Mains hum and appliance rumble below the voice are loud and easy to localise, so ODAS
-//    tracked them as a talker and lost the real one. Measured on the board with a recorded
-//    hum added to recorded speech: without the filter a sentence was lost, with it none.
+//    Steady sound below the voice (hum, rumble, low noise) is loud and easy to localise, so
+//    ODAS tracked it as a talker and lost the real one. Measured on the board with recorded
+//    brown noise from another speaker added to recorded speech: without the filter a sentence was lost, with it none.
 // 2. Echo cancellation, only while the loopback is not idle (it is never silent, but a few
 //    steps of noise):
 //    aec3    WebRTC AEC3, one instance for all six microphones: an adaptive filter per
