@@ -26,7 +26,7 @@ Status: works on one board. Not yet rebuilt from scratch end to end; see "Known 
 | Path | Contents |
 |---|---|
 | `board/` | Runtime: `rsp-stt.py`, its settings and unit, the ODAS config, `rsp-record`, `rsp-replay`, `rsp-listen`, `rsp-leds` |
-| `newos/port/` | Board device tree, AC108 driver port and kernel patch, reference sources |
+| `newos/port/` | Board device tree, kernel patches (`0001` AC108 driver port, `0002` output gain control for the SoC codec), reference sources |
 | `newos/mk-sd-image.sh` | Assembles the SD image from an Armbian rootfs plus our kernel, dtb and services |
 | `newos/overlay/`, `newos/debug-initrd/` | Boot safety net and bring-up tools |
 | `newos/cross/` | Docker cross toolchain (Debian 13 armhf) and the ODAS build with patches |
@@ -138,11 +138,14 @@ LED 0 is at Mic 2 (azimuth 330) and the numbers run clockwise seen from above.
 
 The speaker connector (JST PH 2.0) and the 3.5 mm jack are driven by the SoC's own codec,
 which shows up as playback device 1 of the same sound card. `/etc/asound.conf` makes it the
-default output and adds a software volume, since the codec has none:
+default output. Two volume controls: `Master` is the codec's analogue output stage (kernel
+patch `0002`; the Armbian driver alone fixes it at step 24), `Speaker` is a software gain:
 
 ```
-aplay sound.wav            # any rate or format
-amixer sset Speaker -- 0dB # -40 to +12 dB; the image sets +3 dB; `sudo alsactl store` keeps it
+aplay sound.wav                       # any rate or format
+amixer sset Master 26                 # codec output stage: 0..31, 26 = 0 dB, 31 = about +6 dB, default 24
+amixer sset Speaker -- 0dB            # software gain on top: -40 to +12 dB, clips above 0 dB
+sudo alsactl store                    # keep both across reboots
 ```
 
 The codec shares its I2S controller with the microphones, so while they are recording,
@@ -191,7 +194,8 @@ bootloader expects (`/boot/uEnv.txt`, kernel, dtb and initrd on ext4 partition 2
 card inserted the board boots it; without it, the system on the eMMC boots.
 
 ```
-# in newos/armbian-build (Armbian framework, with port/ files under userpatches/):
+# in newos/armbian-build (Armbian framework; copy newos/port/000*.patch to
+# userpatches/kernel/archive/rockchip-6.18/ first):
 ./compile.sh build BOARD=rk322x-box BRANCH=current RELEASE=trixie BUILD_MINIMAL=yes KERNEL_CONFIGURE=no
 sudo WIFI_SSID=<network> ./mk-sd-image.sh --armed                 # bring-up safety net (default)
 sudo WIFI_SSID=<network> ./mk-sd-image.sh --armed --release       # release profile

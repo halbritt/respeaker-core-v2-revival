@@ -1,0 +1,128 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Heath Albritton <10265718+halbritt@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 00:00:00 +0000
+Subject: [PATCH] ASoC: rk3228-codec: add an output gain control
+
+The driver (an Armbian patch, not mainline) raises the output stage to a
+fixed step, 24 of 31 (-3 dB), whenever playback opens. Keep the wanted step
+in the driver data, default unchanged, and expose it as "Master Playback
+Volume" (-39 dB to +7.5 dB in 1.5 dB steps), so a small speaker on the
+on-board amplifier can use the remaining gain. The registers are written only
+while a stream is open, because the driver zeroes them when idle to avoid pops.
+
+---
+--- a/sound/soc/codecs/rk3228_codec.c
++++ b/sound/soc/codecs/rk3228_codec.c
+@@ -15,6 +15,8 @@
+ #include <linux/regmap.h>
+ #include <sound/pcm_params.h>
+ #include <sound/dmaengine_pcm.h>
++#include <sound/soc.h>
++#include <sound/tlv.h>
+ #include "rk3228_codec.h"
+ 
+ /*
+@@ -25,6 +27,7 @@
+  * Step: 1.5dB
+  */
+ #define OUT_VOLUME	(0x18)
++#define OUT_VOLUME_MAX	(0x1f)
+ #define INITIAL_FREQ	(11289600)
+ 
+ struct rk3228_codec_priv {
+@@ -34,6 +37,8 @@
+ 	struct clk *sclk;
+ 	struct gpio_desc *spk_en_gpio;
+ 	int spk_depop_time; /* msec */
++	unsigned int out_volume; /* HPOUT gain step, applied while playing */
++	bool playing;
+ };
+ 
+ static const struct reg_default rk3228_codec_reg_defaults[] = {
+@@ -216,9 +221,10 @@
+ 	rk3228_analog_output(rk3228, 1);
+ 
+ 	regmap_update_bits(rk3228->regmap, HPOUTL_GAIN_CTRL,
+-			   HPOUTL_GAIN_MASK, OUT_VOLUME);
++			   HPOUTL_GAIN_MASK, rk3228->out_volume);
+ 	regmap_update_bits(rk3228->regmap, HPOUTR_GAIN_CTRL,
+-			   HPOUTR_GAIN_MASK, OUT_VOLUME);
++			   HPOUTR_GAIN_MASK, rk3228->out_volume);
++	rk3228->playing = true;
+ 	return 0;
+ }
+ 
+@@ -256,6 +262,7 @@
+ 	struct rk3228_codec_priv *rk3228 = snd_soc_component_get_drvdata(component);
+ 	int i = 0;
+ 
++	rk3228->playing = false;
+ 	rk3228_analog_output(rk3228, 0);
+ 
+ 	regmap_update_bits(rk3228->regmap, HPOUTL_GAIN_CTRL,
+@@ -376,9 +383,56 @@
+ 	rk3228_codec_power_off(component, 0);
+ }
+ 
++/*
++ * The output stage gain is held at zero while idle and raised when playback
++ * opens (pop suppression), so the control keeps the wanted step and the
++ * registers are only written while a stream is open.
++ */
++static int rk3228_out_volume_get(struct snd_kcontrol *kcontrol,
++				 struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct rk3228_codec_priv *rk3228 = snd_soc_component_get_drvdata(component);
++
++	ucontrol->value.integer.value[0] = rk3228->out_volume;
++	return 0;
++}
++
++static int rk3228_out_volume_put(struct snd_kcontrol *kcontrol,
++				 struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct rk3228_codec_priv *rk3228 = snd_soc_component_get_drvdata(component);
++	long val = ucontrol->value.integer.value[0];
++
++	if (val < 0 || val > OUT_VOLUME_MAX)
++		return -EINVAL;
++	if (val == rk3228->out_volume)
++		return 0;
++
++	rk3228->out_volume = val;
++	if (rk3228->playing) {
++		regmap_update_bits(rk3228->regmap, HPOUTL_GAIN_CTRL,
++				   HPOUTL_GAIN_MASK, val);
++		regmap_update_bits(rk3228->regmap, HPOUTR_GAIN_CTRL,
++				   HPOUTR_GAIN_MASK, val);
++	}
++	return 1;
++}
++
++static const DECLARE_TLV_DB_SCALE(rk3228_out_tlv, -3900, 150, 0);
++
++static const struct snd_kcontrol_new rk3228_codec_controls[] = {
++	SOC_SINGLE_EXT_TLV("Master Playback Volume", SND_SOC_NOPM, 0,
++			   OUT_VOLUME_MAX, 0, rk3228_out_volume_get,
++			   rk3228_out_volume_put, rk3228_out_tlv),
++};
++
+ static struct snd_soc_component_driver soc_codec_dev_rk3228 = {
+ 	.probe = rk3228_codec_probe,
+ 	.remove = rk3228_codec_remove,
++	.controls = rk3228_codec_controls,
++	.num_controls = ARRAY_SIZE(rk3228_codec_controls),
+ };
+ 
+ static bool rk3228_codec_write_read_reg(struct device *dev, unsigned int reg)
+@@ -458,6 +512,8 @@
+ 	if (IS_ERR(rk3228->sclk))
+ 		return PTR_ERR(rk3228->sclk);
+ 
++	rk3228->out_volume = OUT_VOLUME;
++
+ 	rk3228->spk_en_gpio = devm_gpiod_get_optional(&pdev->dev,
+ 						      "spk-en",
+ 						      GPIOD_OUT_LOW);

@@ -343,7 +343,9 @@ for i in 1 2 3 4 5 6; do amixer -q -c 0 sset "ADC$i PGA gain" 24; done
 # the software Speaker control appears at its maximum (+12 dB) on first use: create it
 # with half a second of silence, then set a moderate level before anything audible plays
 aplay -q -D speaker -f S16_LE -r 16000 -c 2 -d 1 /dev/zero 2>/dev/null || true
-amixer -q -c 0 sset Speaker -- 3dB || true
+amixer -q -c 0 sset Speaker -- 0dB || true
+# alsactl gives an unknown "Master" a generic low default (-21 dB); 26 is 0 dB
+amixer -q -c 0 sset Master 26 || true
 alsactl store
 systemctl enable --now rsp-stt.service
 touch /var/lib/rsp-firstboot.done

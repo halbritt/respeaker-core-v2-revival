@@ -498,3 +498,19 @@ def test_board_dts_has_a_playback_link_to_the_soc_codec_beside_the_capture_link(
     links = re.findall(r"dai-link@\d+ \{.*?\n\t\t\};", sound, flags=re.DOTALL)
     assert len(links) == 2, "one link for the microphones, one for the speaker"
     assert handle not in links[0] and f"sound-dai = <{handle}>" in links[1]
+
+
+def test_codec_gain_patch_adds_a_control_and_keeps_the_drivers_default() -> None:
+    """0002 must not make anything louder by itself: the default stays the driver's fixed step."""
+    patch = (PORT_DIR / "0002-ASoC-rk3228-codec-add-an-output-gain-control.patch").read_text(encoding="utf-8")
+    files = set(re.findall(r"^\+\+\+ b/(\S+)", patch, flags=re.MULTILINE))
+    assert files == {"sound/soc/codecs/rk3228_codec.c"}
+    added = "\n".join(line[1:] for line in patch.splitlines() if line.startswith("+") and not line.startswith("+++"))
+    removed = "\n".join(line[1:] for line in patch.splitlines() if line.startswith("-") and not line.startswith("---"))
+    assert '"Master Playback Volume"' in added
+    assert "rk3228->out_volume = OUT_VOLUME;" in added, "starts at the step the driver used before"
+    assert "#define OUT_VOLUME" not in removed and "#define OUT_VOLUME\t" not in added, "the default itself is untouched"
+    assert removed.count("OUT_VOLUME);") == 2 and added.count("rk3228->out_volume);") == 2, "both channels follow the control"
+    assert "Signed-off-by" not in patch, "sign-off is the human submitter's to add"
+    firstboot = (NEWOS_DIR / "mk-sd-image.sh").read_text(encoding="utf-8")
+    assert "sset Master 26" in firstboot, "alsactl would otherwise start an unknown Master at -21 dB"
