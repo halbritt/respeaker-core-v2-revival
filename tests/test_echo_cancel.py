@@ -232,9 +232,11 @@ def _faint_leftover(heard: np.ndarray, seed: int) -> np.ndarray:
 
 def _hand(stt, monkeypatch, audio: np.ndarray, end_s: float, az: int) -> bool:
     calls: list[int] = []
-    monkeypatch.setattr(stt, "transcribe", lambda pcm: calls.append(len(pcm)) or "some words")
+    said: list[dict] = []
+    monkeypatch.setattr(stt, "transcribe", lambda pcm: calls.append(len(pcm)) or "words number %d" % len(calls))
+    monkeypatch.setattr(stt, "emit", lambda text, dur, took, meta: said.append(meta))
     stt.handle(_pcm16(audio), {"t": end_s, "az": az})
-    return bool(calls)
+    return bool(said)
 
 
 def test_faint_leftover_from_the_speakers_direction_is_dropped_once_that_direction_is_known(
@@ -374,3 +376,78 @@ def test_playing_is_known_per_moment_of_the_stream(rsp_stt_loader) -> None:
     assert not stt.PLAYED.playing(20)            # 0.6 s in: nothing yet
     assert stt.PLAYED.playing(70)                # 2.1 s in: playing
     assert not stt.PLAYED.playing(180)           # 5.4 s in: long over
+
+
+# --- a person over the board: what the board said is taken out of their transcript ---
+
+
+def test_the_boards_words_are_taken_out_of_a_transcript(rsp_stt_loader) -> None:
+    stt = rsp_stt_loader()
+    left, gone = stt.without_played(
+        "Every market town keeps one stall that sells nothing extra.\n When we were kids, there was a strange house.",
+        "Every market town keeps one stall that sells nothing but string. This one belongs to a woman named Odile.",
+    )
+    assert left == "extra.\n When we were kids, there was a strange house."
+    assert gone == 9
+
+
+def test_single_common_words_are_not_taken_for_the_boards(rsp_stt_loader) -> None:
+    stt = rsp_stt_loader()
+    assert stt.without_played("I put the kettle on.", "The night train leaves on time.") == ("I put the kettle on.", 0)
+
+
+def _hand_text(stt, monkeypatch, audio, az, texts: list[str]) -> list[dict]:
+    """One utterance; Whisper answers with `texts` in order. Returns what was published."""
+    answers, out = list(texts), []
+    monkeypatch.setattr(stt, "transcribe", lambda pcm: answers.pop(0))
+    monkeypatch.setattr(stt, "has_speech", lambda pcm: True)
+    monkeypatch.setattr(stt, "emit", lambda text, dur, took, meta: out.append(dict(meta, text=text)))
+    stt.handle(_pcm16(audio), {"t": 7.0, "az": az})
+    return out
+
+
+BOARD = "The night train to the mountains leaves from platform nine and it is never quite on time."
+PERSON = "When we were kids there was a strange house and all the shades were always drawn."
+
+
+def test_a_person_over_the_board_is_kept_even_when_most_of_the_sound_is_the_board(rsp_stt_loader, monkeypatch) -> None:
+    """Live, a clearly audible reading scored 55-67% played sound: no limit on the sound separates the two."""
+    stt = rsp_stt_loader(env={"STT_SPEAKER_AZ": "185"})
+    ref, heard = _scene()
+    _play(stt, ref)
+    out = _hand_text(stt, monkeypatch, _over_the_speaker(heard, 60, 0.62), 74, [PERSON, BOARD])
+    assert [o["text"] for o in out] == [PERSON]
+    assert out[0]["over_speaker"] is True
+
+
+def test_the_boards_words_do_not_reach_the_persons_transcript(rsp_stt_loader, monkeypatch) -> None:
+    stt = rsp_stt_loader(env={"STT_SPEAKER_AZ": "185"})
+    ref, heard = _scene()
+    _play(stt, ref)
+    mixed = "The night train to the mountains leaves from hot brown wine. " + PERSON
+    out = _hand_text(stt, monkeypatch, _over_the_speaker(heard, 60, 0.4), 74, [mixed, BOARD])
+    assert [o["text"] for o in out] == ["hot brown wine. " + PERSON]
+
+
+def test_the_board_alone_heard_off_a_wall_is_dropped_by_its_words(rsp_stt_loader, monkeypatch, capsys) -> None:
+    stt = rsp_stt_loader(env={"STT_SPEAKER_AZ": "185"})
+    ref, heard = _scene()
+    _play(stt, ref)
+    assert _hand_text(stt, monkeypatch, _over_the_speaker(heard, 60, 0.4), 74, [BOARD, BOARD]) == []
+    assert "drop: own speaker" in capsys.readouterr().out
+
+
+def test_a_few_garbled_words_of_mostly_played_sound_are_dropped(rsp_stt_loader, monkeypatch) -> None:
+    """The board alone, tracked at a reflection, gave 'All by our heart.' at 69% played sound."""
+    stt = rsp_stt_loader(env={"STT_SPEAKER_AZ": "185"})
+    ref, heard = _scene()
+    _play(stt, ref)
+    assert _hand_text(stt, monkeypatch, _over_the_speaker(heard, 61, 0.75), 74, ["All by our heart.", BOARD]) == []
+
+
+def test_whisper_is_not_asked_twice_when_the_speaker_is_silent(rsp_stt_loader, monkeypatch) -> None:
+    stt = rsp_stt_loader(env={"STT_SPEAKER_AZ": "185"})
+    _play(stt, np.zeros(10 * RATE))
+    stt.PLAYED.blocks = type(stt.PLAYED.blocks)([None] * len(stt.PLAYED.blocks), maxlen=4000)
+    out = _hand_text(stt, monkeypatch, _speechlike(6, seed=10, level=0.3), 74, [PERSON])
+    assert [o["text"] for o in out] == [PERSON] and "over_speaker" not in out[0]

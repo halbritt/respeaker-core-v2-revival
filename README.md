@@ -192,19 +192,31 @@ them (`STT_AEC=0` turns both off):
    - it has no direction or comes from the speaker's direction (`STT_SPEAKER_AZ`, 185
      degrees on this board, within `STT_ECHO_AZ`, default 25), and a tenth of its energy is
      coherent with what was played (`STT_ECHO_SHARE`), or it overlaps playback at all;
-   - it comes from anywhere else and half of it is what was played
-     (`STT_ECHO_SHARE_ELSEWHERE`). Below that it is a person talking over the board.
+   - it comes from anywhere else and its words are the board's. No limit on the sound
+     separates the two cases there (a person reading clearly over the board scored up to
+     67% played sound, the board alone as little as 49%), so the service also sends Whisper
+     what the speaker played during those seconds, takes runs of three or more of those
+     words out of the utterance's transcript, and keeps what is left. With half or more
+     played sound (`STT_ECHO_SHARE_ELSEWHERE`) at least eight words must be left
+     (`STT_ECHO_WORDS`). Such transcripts carry `over_speaker` and `own_words`.
+3. **Following the right beam.** The service follows the loudest ODAS beam. While the board
+   speaks that is its own, so when something else is tracked as well, the speaker's beam
+   is left out of the choice.
 
 **Talking over the board, measured with a person** (2026-11-18): the board read a 70-second
-text at its usual volume while someone across the room spoke over it. At the microphones the
-speaker was 25 dB louder than the person. With AEC3 and the single 10% limit, nothing they
-said reached a transcript until the board stopped. With Speex and the direction rule, their
-sentences did, from their direction, with 35-45% of each utterance being played sound; a few
-of the board's own words came along ("Chandlery", and the board's first sentence joined to
-the person's first remark). The same settings on a take of the board speaking alone for 85 s
-let one word through ("So"). This is one person, one room and one take; the 50% limit sits
-between 45% (person over board) and 49-76% (board alone, tracked at a reflection), which is
-not much room.
+text at its usual volume while someone across the room read poems aloud over it, three
+times. At the microphones the speaker was 25 dB louder than the person.
+
+| | What reached a transcript while the board spoke |
+|---|---|
+| AEC3, one 10% limit (first take, live) | nothing |
+| Speex, 50% limit by direction (second take, live) | nothing: the service followed the speaker's beam |
+| the same, following the person's beam (third take, live) | three of four passages, the first two mixed with the board's words |
+| the same with the word comparison (all three takes, replayed) | every passage; 23 of the board's words removed from one transcript |
+
+The last row has not been run live. On a take of the board speaking alone for 85 s the same
+settings let one word through ("So"). Words the board said that Whisper heard differently
+stay in the person's transcript ("Chandlery", "the fish farmer"). One person, one room.
 
 The earlier comparison below was made by adding recordings together, and it pointed the
 other way for a quiet talker: it did not show that AEC3's suppressor leaves ODAS nothing to
@@ -353,10 +365,10 @@ the command line means `bringup`.
 - Speech in loud steady noise: with noise in the speech band within about 5 dB of the
   talker, a fifth to a third of the words were still lost (see the hum measurements under "Audio
   pipeline"). All of this was measured with one talker and one noise source.
-- Talking over the board while it speaks (barge-in) worked in one live test with one person
-  (see "Not hearing itself"); some of the board's own words end up in that person's
-  transcript, and the limit that tells the two apart has little margin. The microphones
-  peak at 0.90-0.95 of full scale while the board speaks at its usual volume.
+- Talking over the board while it speaks (barge-in): see "Not hearing itself". The final
+  rule was checked by replaying three takes of one person, not yet live, and words of the
+  board's that Whisper mishears stay in the person's transcript. The microphones peak at
+  0.90-0.95 of full scale while the board speaks at its usual volume.
 - The kernel's USB PHY use-after-free (see above) is worked around in the device tree; a fix
   for the driver is in `newos/port/patches/` and has not been sent upstream.
 - Mic gain is 24 dB: at 28 dB a talker close to the board peaked at -0.8 dBFS. Not calibrated further.

@@ -48,7 +48,8 @@ AEC       = env("STT_AEC", "1") == "1"   # remove the board's own speaker from t
 AEC_BIN   = env("STT_AEC_BIN", "/opt/rsp-stt/rsp-aec")   # native canceller (WebRTC AEC3); built-in one without it
 AEC_ARGS  = env("STT_AEC_ARGS", "")      # options for it, see rsp-aec.cc
 ECHO_SIM  = env("STT_ECHO_SHARE", 0.1, float)   # utterances with this share of played sound in them are the board's own voice
-ECHO_FAR  = env("STT_ECHO_SHARE_ELSEWHERE", 0.5, float)   # the same limit for a tracked sound away from the speaker's direction: a person talking over the board
+ECHO_FAR  = env("STT_ECHO_SHARE_ELSEWHERE", 0.5, float)   # a tracked sound away from the speaker's direction with this share of played sound needs ECHO_WORDS words of its own
+ECHO_WORDS = env("STT_ECHO_WORDS", 8, int)   # words the board did not say that such an utterance must contain
 SPEAKER_AZ_SET = env("STT_SPEAKER_AZ", "")   # direction (degrees) the board's own speaker is heard from; empty = learn it
 ECHO_AZ   = env("STT_ECHO_AZ", 25, float)   # degrees round the speaker's direction treated as the speaker while it plays
 PLAYBACK  = [0.0]                        # when the speaker was last heard playing (time.time())
@@ -268,6 +269,17 @@ class PlayedLog:
         # (about 1/segs, more with overlapping windows): take that chance level off
         return max(0.0, share - 1.5 / segs)
 
+    def span(self, nbytes, end_s):
+        """What the speaker played while an utterance was heard, as 16-bit mono; None if it was silent."""
+        m = nbytes // 2 // self.BLOCK
+        hi = int(round(end_s * 1000 / 30)) - 10
+        base = self.n - len(self.blocks)
+        part = [self.blocks[k - base] for k in range(max(hi - m - 20, base), min(hi + self.AHEAD, self.n))]
+        if not part or sum(b is not None for b in part) < 0.2 * len(part):
+            return None
+        zero = np.zeros(self.BLOCK, np.int16)
+        return np.concatenate([zero if b is None else b for b in part]).astype("<i2").tobytes()
+
     def playing(self, k):
         """Was the speaker playing around block k of the stream (the last 0.6 s up to it)?"""
         base = self.n - len(self.blocks)
@@ -318,6 +330,24 @@ def without_speaker(levels, tracks, playing):
     if not any(mine) or not any(t is not None and not m for t, m in zip(tracks, mine)):
         return levels
     return [0.0 if m else lv for lv, m in zip(levels, mine)]
+
+def without_played(text, played):
+    """Take the board's own words out of a transcript: runs of three or more words that also
+    occur, in the same order, in the transcript of what the speaker played. Returns what is
+    left and how many words went."""
+    norm = lambda w: re.sub(r"[^a-z0-9']", "", w.lower())
+    parts = re.split(r"(\s+)", text)                       # words at even places, spacing between
+    words = [i for i in range(0, len(parts), 2) if parts[i]]
+    a, b = [norm(parts[i]) for i in words], [norm(w) for w in played.split()]
+    gone = set()
+    for blk in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
+        if blk.size >= 3:
+            gone.update(range(blk.a, blk.a + blk.size))
+    out = []
+    for n, i in enumerate(words):
+        if n not in gone:
+            out.append((parts[i - 1] if i and out else "") + parts[i])
+    return "".join(out), len(gone)
 
 def wav_bytes(pcm):
     buf = io.BytesIO()
@@ -529,14 +559,16 @@ def handle(frames, meta):
         # A tracked sound from somewhere else is a person, with the speaker's leftover under
         # them, until most of it is what was played. This needs to know where the speaker is.
         known = SPEAKER_AZ_SET != "" or bool(SPEAKER_AZ)
-        limit = ECHO_FAR if az is not None and known and not near else ECHO_SIM
-        if sim >= limit or there:
+        over = az is not None and known and not near and sim >= ECHO_SIM   # its words decide, below
+        if (sim >= ECHO_SIM and not over) or there:
             log("drop: own speaker in %.1fs utterance%s (%.0f%% of it is what was played%s)" % (
                 dur, " az=%d" % az if az is not None else "", sim * 100,
                 ", from the speaker's direction" if sim < ECHO_SIM else ""))
             return
         if sim >= 0.03:
             meta = dict(meta, echo=round(sim, 2))          # kept in the record, to tune the limit
+        if over:
+            meta = dict(meta, over_speaker=True)
     if meta.get("untracked") and not speech_gate_on():
         log("drop: %.1fs untracked, and no speech gate to check it" % dur)
         return
@@ -554,6 +586,18 @@ def handle(frames, meta):
     try:
         raw = transcribe(pcm)
         text = clean(raw)
+        if meta.get("over_speaker"):
+            # No limit on the sound tells a person over the board from the board alone (a
+            # clear reading scored 67% played sound, the board alone 49%). The words do:
+            # the loopback is clean, so Whisper says exactly what the board said.
+            played = PLAYED.span(len(pcm), meta["t"])
+            text, gone = without_played(text, clean(transcribe(played)) if played else "")
+            left = len(text.split())
+            if left < (ECHO_WORDS if meta.get("echo", 0) >= ECHO_FAR else 1):
+                log("drop: own speaker in %.1fs utterance az=%d (%.0f%% of it is what was played, "
+                    "%d of its words are the board's, %d are not)" % (dur, meta["az"], meta.get("echo", 0) * 100, gone, left))
+                return
+            meta = dict(meta, own_words=gone)
         if SAVE_DIR:
             save_utterance(pcm, raw, meta)
         if ab:
