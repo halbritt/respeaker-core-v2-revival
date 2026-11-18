@@ -340,6 +340,10 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
 apt-get install -y -q --no-install-recommends python3-numpy python3-onnxruntime gpiod alsa-utils libfftw3-single3 libconfig11 libpulse0 libasound2t64
 for i in 1 2 3 4 5 6; do amixer -q -c 0 sset "ADC$i PGA gain" 24; done
+# the software Speaker control appears at its maximum (+12 dB) on first use: create it
+# with half a second of silence, then set a moderate level before anything audible plays
+aplay -q -D speaker -f S16_LE -r 16000 -c 2 -d 1 /dev/zero 2>/dev/null || true
+amixer -q -c 0 sset Speaker -- 6dB || true
 alsactl store
 systemctl enable --now rsp-stt.service
 touch /var/lib/rsp-firstboot.done
