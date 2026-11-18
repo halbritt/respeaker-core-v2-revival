@@ -341,3 +341,36 @@ def test_a_reflection_does_not_move_the_configured_speaker_direction(rsp_stt_loa
     _play(stt, ref)
     assert not _hand(stt, monkeypatch, heard[RATE : 7 * RATE], 7.0, az=70)       # clear echo, heard off a wall
     assert _hand(stt, monkeypatch, _over_the_speaker(heard, 62, 0.4), 7.0, az=65), "the talker near that wall is kept"
+
+
+# --- which beam to follow while the board speaks ---
+
+
+def test_while_the_board_speaks_a_person_elsewhere_is_followed_not_the_speaker(rsp_stt_loader) -> None:
+    """Live, the speaker's beam was the loudest for the whole of a 70 s reading and the person
+    talking over it from 74 degrees never got a transcript."""
+    stt = rsp_stt_loader(env={"STT_SPEAKER_AZ": "185"})
+    tracks = [{"az": 170.0}, {"az": 74.0}, None, None]
+    assert stt.without_speaker([900.0, 200.0, 5.0, 5.0], tracks, True) == [0.0, 200.0, 5.0, 5.0]
+
+
+def test_the_loudest_beam_is_followed_as_before_when_the_board_is_silent(rsp_stt_loader) -> None:
+    stt = rsp_stt_loader(env={"STT_SPEAKER_AZ": "185"})
+    tracks = [{"az": 170.0}, {"az": 74.0}, None, None]
+    assert stt.without_speaker([900.0, 200.0, 5.0, 5.0], tracks, False) == [900.0, 200.0, 5.0, 5.0]
+
+
+def test_the_speakers_beam_is_kept_when_nothing_else_is_tracked(rsp_stt_loader) -> None:
+    """Otherwise its leftover would be followed in an untracked slot and never be recognised by direction."""
+    stt = rsp_stt_loader(env={"STT_SPEAKER_AZ": "185"})
+    assert stt.without_speaker([900.0, 20.0], [{"az": 170.0}, None], True) == [900.0, 20.0]
+    assert stt.without_speaker([900.0, 20.0], [{"az": 60.0}, {"az": 80.0}], True) == [900.0, 20.0]
+
+
+def test_playing_is_known_per_moment_of_the_stream(rsp_stt_loader) -> None:
+    stt = rsp_stt_loader()
+    _play(stt, np.concatenate([np.zeros(RATE), _speechlike(2, seed=3, level=0.3), np.zeros(3 * RATE)]))
+    stt.PLAYED.blocks = type(stt.PLAYED.blocks)([None if not b.any() else b for b in stt.PLAYED.blocks], maxlen=4000)
+    assert not stt.PLAYED.playing(20)            # 0.6 s in: nothing yet
+    assert stt.PLAYED.playing(70)                # 2.1 s in: playing
+    assert not stt.PLAYED.playing(180)           # 5.4 s in: long over

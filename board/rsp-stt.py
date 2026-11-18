@@ -268,6 +268,12 @@ class PlayedLog:
         # (about 1/segs, more with overlapping windows): take that chance level off
         return max(0.0, share - 1.5 / segs)
 
+    def playing(self, k):
+        """Was the speaker playing around block k of the stream (the last 0.6 s up to it)?"""
+        base = self.n - len(self.blocks)
+        hi = min(k, self.n)
+        return any(self.blocks[j - base] is not None for j in range(max(hi - 20, base), hi))
+
     def overlap(self, nbytes, end_s):
         """0..1: how much of an utterance's time the speaker was playing."""
         m = nbytes // 2 // self.BLOCK
@@ -301,6 +307,17 @@ def from_speaker(az):
     mean = math.degrees(math.atan2(sum(math.sin(math.radians(a)) for a in SPEAKER_AZ),
                                    sum(math.cos(math.radians(a)) for a in SPEAKER_AZ)))
     return abs((az - mean + 180) % 360 - 180) <= ECHO_AZ
+
+def without_speaker(levels, tracks, playing):
+    """Slot levels for choosing the beam to follow. While the board speaks, its own beam is
+    the loudest in the room; when something else is tracked as well, that is a person
+    talking over it, and the speaker's beam is taken out of the choice."""
+    if not playing:
+        return levels
+    mine = [t is not None and from_speaker(t["az"]) for t in tracks]
+    if not any(mine) or not any(t is not None and not m for t, m in zip(tracks, mine)):
+        return levels
+    return [0.0 if m else lv for lv, m in zip(levels, mine)]
 
 def wav_bytes(pcm):
     buf = io.BytesIO()
@@ -917,6 +934,7 @@ def run_odas():
             # one is where the talker currently is. Follow it, with hysteresis so the
             # payload does not hop between beams on every syllable.
             lv = np.sqrt((a.astype(np.float64) ** 2).mean(axis=0))
+            lv = np.array(without_speaker(list(lv), TRACKS[:ODAS_STREAMS], AEC and PLAYED.playing(one.n)))
             best = int(lv.argmax())
             if best != cur[0] and lv[best] > 2.0 * lv[cur[0]] + 30:
                 lead[0] += 1
