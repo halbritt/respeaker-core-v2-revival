@@ -134,6 +134,22 @@ LEDs over SPI:
 The ring's supply is switched by GPIO2_A2 (low = on), held by the `rsp-led-power` service.
 LED 0 is at Mic 2 (azimuth 330) and the numbers run clockwise seen from above.
 
+### Speaker
+
+The speaker connector (JST PH 2.0) and the 3.5 mm jack are driven by the SoC's own codec,
+which shows up as playback device 1 of the same sound card. `/etc/asound.conf` makes it the
+default output and adds a software volume, since the codec has none:
+
+```
+aplay sound.wav            # any rate or format
+amixer sset Speaker 60%    # kept across reboots after `sudo alsactl store`
+```
+
+The codec shares its I2S controller with the microphones, so while they are recording,
+playback runs at 16 kHz and ALSA converts. The codec driver is an Armbian kernel patch, not
+mainline. Tested by playing a tone and finding it in the microphone capture, which carried on
+without a gap.
+
 ## ODAS
 
 Built from introlab/odas commit 004cb82 plus `newos/cross/patches/`, which
@@ -216,7 +232,8 @@ the command line means `bringup`.
   running board was brought up step by step.
 - The new OS runs from the SD card. The eMMC works under 6.18 (clock limited to 37.5 MHz),
   but installing to it is not scripted.
-- Playback (the on-chip DAC), echo cancellation and a local wake-word model are not set up.
+- Echo cancellation and a local wake-word model are not set up: the board hears and
+  transcribes whatever its own speaker plays.
   The loopback channels are captured but unused.
 - The kernel's USB PHY use-after-free (see above) is worked around in the device tree; a fix
   for the driver is in `newos/port/patches/` and has not been sent upstream.

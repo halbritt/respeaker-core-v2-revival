@@ -301,6 +301,7 @@ install -m 755 "$HERE/../board/rsp-record" "$HERE/../board/rsp-replay" "$HERE/..
 # LED ring: supply switch, write access for the service user, direction display
 install -m 644 "$HERE/../board/rsp-leds.service" "$HERE/../board/rsp-led-power.service" "$R/etc/systemd/system/"
 install -D -m 644 "$HERE/../board/60-rsp-leds.rules" "$R/etc/udev/rules.d/60-rsp-leds.rules"
+install -m 644 "$HERE/../board/asound.conf" "$R/etc/asound.conf"   # default output: the speaker, with a software volume
 for u in rsp-leds rsp-led-power; do
 	ln -sf /etc/systemd/system/$u.service "$R/etc/systemd/system/multi-user.target.wants/$u.service"
 done

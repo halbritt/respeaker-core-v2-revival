@@ -332,3 +332,34 @@ def test_direction_is_published_again_only_when_the_talker_has_moved(rsp_stt_loa
     events = _events_while_feeding(stt, [a] * 30 + [wobble] * 30 + [b] * 30)
     assert events[0]["event"] == "speech_start" and events[0]["az"] == 350.0
     assert [e["az"] for e in events if e["event"] == "speech_dir"] == [60]
+
+
+# --- nothing longer than a couple of seconds disappears without a trace ---
+
+
+def _feed(seg, seconds: float, amp: int) -> None:
+    for _ in range(int(seconds / 0.03)):
+        seg.feed(_pcm(0.03, amp=amp))
+
+
+def test_long_sound_the_tracker_never_located_is_logged_when_dropped(rsp_stt_loader, capsys) -> None:
+    stt = rsp_stt_loader()
+    seg = stt.Segmenter(meta=lambda: None, name="t")
+    _feed(seg, 6.0, 6000)
+    _feed(seg, 3.0, 0)
+    assert re.search(r"drop: .*6\.\ds.*untracked", capsys.readouterr().out)
+
+
+def test_short_untracked_sounds_stay_out_of_the_log(rsp_stt_loader, capsys) -> None:
+    stt = rsp_stt_loader()
+    seg = stt.Segmenter(meta=lambda: None, name="t")
+    _feed(seg, 0.6, 6000)
+    _feed(seg, 3.0, 0)
+    assert "drop" not in capsys.readouterr().out
+
+
+def test_long_utterance_that_whisper_returns_empty_is_logged(rsp_stt_loader, monkeypatch, capsys) -> None:
+    stt = rsp_stt_loader()
+    _script_transcripts(monkeypatch, stt, [""])
+    stt.handle([_pcm(5.0)], {"t": 9.0, "az": 90})
+    assert re.search(r"drop: .*5\.0s.*empty transcript", capsys.readouterr().out)

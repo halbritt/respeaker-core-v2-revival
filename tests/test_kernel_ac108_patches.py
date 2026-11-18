@@ -137,7 +137,7 @@ def test_f5_t1_dts_hardware_safety_invariants() -> None:
     sound = _extract_dts_block(stripped, r"sound")
     assert 'compatible = "simple-audio-card";' in sound
     assert 'simple-audio-card,name = "seeed-8mic-voicecard";' in sound
-    assert "simple-audio-card,mclk-fs = <256>;" in sound
+    assert sound.count("mclk-fs = <256>;") == 2, "both links clock the codecs at 256 fs"
     assert "sound-dai = <&i2s1>;" in sound
     assert "sound-dai = <&ac108_0>;" in sound
 
@@ -483,3 +483,18 @@ def test_f5_t2_port_patches_rejects_unsigned_without_owner_gate_and_broken_heade
     )
     (signed_no_doc / real_patch.name).write_text(signed_txt, encoding="utf-8")
     _validate_port_patches_dir(signed_no_doc, tmp_path / "w_signed_no_doc")
+
+
+def test_board_dts_has_a_playback_link_to_the_soc_codec_beside_the_capture_link(tmp_path: Path) -> None:
+    """The speaker connector is driven by the SoC codec on the same I2S controller as the mics."""
+    out = tmp_path / "board.dtb"
+    res = compile_dts(DTS_MAIN, out)
+    assert res.returncode == 0, res.stderr
+    dump = subprocess.run(["dtc", "-q", "-I", "dtb", "-O", "dts", str(out)], capture_output=True, text=True, check=True).stdout
+    codec = _extract_dts_block(dump, r"codec@12010000")
+    assert 'status = "okay"' in codec and "#sound-dai-cells" in codec
+    handle = re.search(r"phandle = <(0x[0-9a-f]+)>", codec).group(1)
+    sound = _extract_dts_block(dump, r"\n\tsound")
+    links = re.findall(r"dai-link@\d+ \{.*?\n\t\t\};", sound, flags=re.DOTALL)
+    assert len(links) == 2, "one link for the microphones, one for the speaker"
+    assert handle not in links[0] and f"sound-dai = <{handle}>" in links[1]

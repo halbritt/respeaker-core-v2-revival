@@ -40,6 +40,7 @@ MIX       = env("STT_CHANNEL", "sum")          # "sum" = average of the mics, or
 MICS      = env("STT_MICS", 6, int)            # channels 0..MICS-1 are microphones
 RATE      = 16000
 FRAME_MS  = 30
+LOG_DROP_MS = 2000     # dropped sounds at least this long are always logged
 DIR_STEP  = 15         # degrees a talker must move before speech_dir is published again
 LANGUAGE  = env("STT_LANGUAGE", "en")
 START_RATIO = env("STT_START_RATIO", 3.0, float)   # speech = rms > noise floor * ratio
@@ -336,8 +337,8 @@ def handle(frames, meta):
     if text:
         RECENT.append((t_end - dur, t_end, text))
         emit(text, dur, time.time() - t0, meta)
-    elif DEBUG:
-        log("debug: %.1fs utterance -> empty transcript" % dur)
+    elif DEBUG or dur * 1000 >= LOG_DROP_MS:
+        log("drop: %.1fs utterance%s: empty transcript" % (dur, " az=%d" % meta["az"] if "az" in meta else ""))
 
 # Offline replay (STT_OFFLINE=1): the ODAS cfg reads a recording instead of the sound card,
 # which runs faster than real time, so queue without limit and drain before exiting.
@@ -447,7 +448,8 @@ class Segmenter:
             if not why and dyn < MIN_DYN_DB:
                 why = "flat level (%.1f dB)" % dyn
             if why:
-                if DEBUG or why != "untracked":
+                # short untracked sounds are everyday noise; anything longer must leave a trace
+                if DEBUG or why != "untracked" or len(self.utt) * FRAME_MS >= LOG_DROP_MS:
                     log("drop: %s %.1fs %s dyn=%.1f" % (self.name, len(self.utt) * FRAME_MS / 1000.0, why, dyn))
                 voiced_ms = 0
             publish("speech_end", dict(meta, ts=time.strftime("%Y-%m-%dT%H:%M:%S%z"),

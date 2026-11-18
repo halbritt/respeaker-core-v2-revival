@@ -97,18 +97,60 @@
 		reset-gpios = <&gpio2 RK_PD2 GPIO_ACTIVE_LOW>;
 	};
 
+	/*
+	 * The SoC's own audio codec (DAC only in this driver). Mainline's rk322x.dtsi has
+	 * no node for it; Armbian's has the same one, disabled, and the two merge. The
+	 * driver (CONFIG_SND_SOC_RK3228) is an Armbian kernel patch. GPIO1_A3 enables the
+	 * speaker amplifier.
+	 */
+	codec_rk3228: codec@12010000 {
+		compatible = "rockchip,rk3228-codec";
+		reg = <0x12010000 0x1000>;
+		clocks = <&cru SCLK_I2S_OUT>, <&cru PCLK_ACODECPHY>, <&cru SCLK_I2S1>;
+		clock-names = "mclk", "pclk", "sclk";
+		spk-en-gpio = <&gpio1 RK_PA3 GPIO_ACTIVE_HIGH>;
+		#sound-dai-cells = <0>;
+		status = "okay";
+	};
+
 	sound {
 		compatible = "simple-audio-card";
 		simple-audio-card,name = "seeed-8mic-voicecard";
-		simple-audio-card,format = "i2s";
-		simple-audio-card,mclk-fs = <256>;
+		#address-cells = <1>;
+		#size-cells = <0>;
 
-		simple-audio-card,cpu {
-			sound-dai = <&i2s1>;
+		/* pcm 0: capture, eight channels from the two AC108 */
+		simple-audio-card,dai-link@0 {
+			reg = <0>;
+			format = "i2s";
+			mclk-fs = <256>;
+
+			cpu {
+				sound-dai = <&i2s1>;
+			};
+
+			codec {
+				sound-dai = <&ac108_0>;
+			};
 		};
 
-		simple-audio-card,codec {
-			sound-dai = <&ac108_0>;
+		/*
+		 * pcm 1: playback through the SoC's own codec to the speaker amplifier
+		 * (JST connector) and the 3.5 mm jack. Same I2S controller as the mics,
+		 * so playback runs at the capture rate while capture is open.
+		 */
+		simple-audio-card,dai-link@1 {
+			reg = <1>;
+			format = "i2s";
+			mclk-fs = <256>;
+
+			cpu {
+				sound-dai = <&i2s1>;
+			};
+
+			codec {
+				sound-dai = <&codec_rk3228>;
+			};
 		};
 	};
 
