@@ -142,7 +142,7 @@ default output and adds a software volume, since the codec has none:
 
 ```
 aplay sound.wav            # any rate or format
-amixer sset Speaker -- 0dB # -40 to +12 dB; the image sets +6 dB; `sudo alsactl store` keeps it
+amixer sset Speaker -- 0dB # -40 to +12 dB; the image sets +3 dB; `sudo alsactl store` keeps it
 ```
 
 The codec shares its I2S controller with the microphones, so while they are recording,
