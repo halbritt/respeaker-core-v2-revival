@@ -342,11 +342,58 @@ def _feed(seg, seconds: float, amp: int) -> None:
         seg.feed(_pcm(0.03, amp=amp))
 
 
-def test_long_sound_the_tracker_never_located_is_logged_when_dropped(rsp_stt_loader, capsys) -> None:
-    stt = rsp_stt_loader()
+def _untracked_utterance(stt, seconds: float = 6.0):
+    """What the segmenter queues for a sound ODAS never tracked: (frames, meta) or None."""
     seg = stt.Segmenter(meta=lambda: None, name="t")
-    _feed(seg, 6.0, 6000)
+    _feed(seg, seconds, 6000)
     _feed(seg, 3.0, 0)
+    return None if stt.PENDING.empty() else stt.PENDING.get_nowait()
+
+
+def test_long_sound_the_tracker_never_located_goes_to_the_speech_gate(rsp_stt_loader) -> None:
+    """Measured on the board: in a noisy room ODAS loses a talker for seconds at a time. Those
+    seconds used to be thrown away as noise; the speech gate is the better judge of that."""
+    stt = rsp_stt_loader()
+    item = _untracked_utterance(stt)
+    assert item is not None, "six seconds of sound were discarded without asking the speech gate"
+    frames, meta = item
+    assert meta.get("untracked") is True and "az" not in meta
+
+
+def test_untracked_speech_is_transcribed(rsp_stt_loader, monkeypatch) -> None:
+    stt = rsp_stt_loader()
+    frames, meta = _untracked_utterance(stt)
+    sent: list[int] = []
+    monkeypatch.setattr(stt, "speech_gate_on", lambda: True)
+    monkeypatch.setattr(stt, "has_speech", lambda pcm: True)
+    monkeypatch.setattr(stt, "transcribe", lambda pcm: sent.append(len(pcm)) or "some words")
+    stt.handle(frames, meta)
+    assert len(sent) == 1
+
+
+def test_untracked_noise_is_dropped_by_the_gate_and_leaves_a_trace(rsp_stt_loader, monkeypatch, capsys) -> None:
+    stt = rsp_stt_loader()
+    frames, meta = _untracked_utterance(stt)
+    monkeypatch.setattr(stt, "speech_gate_on", lambda: True)
+    monkeypatch.setattr(stt, "has_speech", lambda pcm: False)
+    monkeypatch.setattr(stt, "transcribe", lambda pcm: pytest.fail("noise was sent to Whisper"))
+    stt.handle(frames, meta)
+    assert re.search(r"drop: no speech in 6\.\ds utterance", capsys.readouterr().out)
+
+
+def test_without_a_speech_gate_untracked_sounds_are_never_sent(rsp_stt_loader, monkeypatch, capsys) -> None:
+    """Whisper writes sentences for noise; with nothing to check for speech, keep the old rule."""
+    stt = rsp_stt_loader()
+    frames, meta = _untracked_utterance(stt)
+    monkeypatch.setattr(stt, "speech_gate_on", lambda: False)
+    monkeypatch.setattr(stt, "transcribe", lambda pcm: pytest.fail("unchecked noise was sent to Whisper"))
+    stt.handle(frames, meta)
+    assert re.search(r"drop: .*6\.\ds.*untracked", capsys.readouterr().out)
+
+
+def test_untracked_sounds_can_be_dropped_outright(rsp_stt_loader, capsys) -> None:
+    stt = rsp_stt_loader(env={"STT_UNTRACKED_MIN_MS": "0"})
+    assert _untracked_utterance(stt) is None
     assert re.search(r"drop: .*6\.\ds.*untracked", capsys.readouterr().out)
 
 

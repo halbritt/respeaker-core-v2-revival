@@ -41,7 +41,7 @@ Rockchip loader tools, kernel/rootfs output, a static busybox for the initramfs.
 
 ```
 arecord (8 ch, 16 kHz, S32) --> rsp-aec --FIFO--> odaslive --+-- tracked sources (JSON, TCP 9000)
-        |                   (removes the speaker)            +-- postfiltered audio (TCP 9002)
+        |              (hum and own speaker removed)         +-- postfiltered audio (TCP 9002)
         +--> ~/recordings/*.raw (on request)                 +-- separated audio    (TCP 9003)
                                                         |
                               rsp-stt: follow the loudest source, VAD, utterances
@@ -51,6 +51,20 @@ arecord (8 ch, 16 kHz, S32) --> rsp-aec --FIFO--> odaslive --+-- tracked sources
 
 - `rsp-stt` owns the sound card and feeds ODAS through a FIFO, so it can save the raw capture
   while transcription carries on, and a capture overrun does not end the pipeline.
+- On the way, `rsp-aec` high-passes the microphones at 120 Hz and removes the board's own
+  speaker (see "Not hearing itself"). The filter is there because ODAS localises mains hum
+  and appliance rumble very well: with a steady hum in the room (strongest at 60-140 Hz) it
+  tracked the appliance as a talker and produced a 12-second non-speech "utterance" about
+  four times a minute, each lighting the LED ring and costing a pass of the speech gate.
+  With the filter there were none in ten minutes with the same hum. `STT_AEC_ARGS="--highpass 0"`
+  turns it off. Recorded speech with that hum added, replayed five times at different
+  offsets: 19% word error rate with the filter, 23% without. With the hum doubled it was the
+  other way round (42% against 26%): unfiltered, the hum holds the detector open, so
+  everything is sent; filtered, quiet stretches of speech fall below the level detector.
+- A sound that ODAS never tracked is dropped as noise if it is shorter than 2 s
+  (`STT_UNTRACKED_MIN_MS`); a longer one goes to the speech gate. In a noisy room ODAS loses
+  a talker for seconds at a time, and those seconds used to be discarded unheard. Their
+  transcripts carry `"untracked": true` and no direction.
 - The postfiltered stream (noise-masked) decides when someone is speaking; the separated
   stream (plain beamformer) is what is sent to Whisper, which recognises it slightly better.
 - `STT_ODAS_MODE=dominant` (default) produces one stream that follows the loudest tracked
@@ -68,7 +82,8 @@ arecord (8 ch, 16 kHz, S32) --> rsp-aec --FIFO--> odaslive --+-- tracked sources
 - `STT_SOURCE=arecord` bypasses ODAS and averages the six mics (works on the vendor image).
 
 Each transcript is one JSON object: `ts`, `text`, `audio_s`, `stt_s`, and with ODAS `az`
-(azimuth), `el` (elevation), `src` (ODAS track id), `t` (seconds since start).
+(azimuth), `el` (elevation), `src` (ODAS track id), `t` (seconds since start), `dyn_db` (level
+variation), and `echo` or `untracked` where they apply.
 
 Settings live in `/etc/default/rsp-stt` (`board/rsp-stt.env`); site-specific values such as
 the Whisper server address go in `/etc/default/rsp-stt.local`.
@@ -204,8 +219,8 @@ Things that matter when changing any of this:
   from 59% to 41% of a core. Six single-channel instances cost 159%.
 - libspeexdsp's NEON option covers its resampler only, not the echo canceller.
 
-`rsp-replay` judges a recording the same way: it reads what the speaker played from the
-recording's own loopback channels.
+`rsp-replay` treats a recording as the live capture: it feeds it to ODAS through `rsp-aec`
+and reads what the speaker played from the recording's own loopback channels.
 
 ## ODAS
 
@@ -294,6 +309,9 @@ the command line means `bringup`.
 - The new OS runs from the SD card. The eMMC works under 6.18 (clock limited to 37.5 MHz),
   but installing to it is not scripted.
 - A local wake-word model is not set up.
+- Speech in loud steady noise: the level detector works on ODAS's noise-masked stream and
+  misses quiet stretches of speech when the noise in the speech band comes within about
+  5 dB of the talker (see the hum measurements under "Audio pipeline").
 - Talking over the board while it speaks (barge-in) only works when the talker is about as
   loud as the speaker at the microphones; see "Not hearing itself". It was measured by adding
   recordings together, not yet by a person talking over the speaker.

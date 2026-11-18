@@ -41,6 +41,9 @@ MICS      = env("STT_MICS", 6, int)            # channels 0..MICS-1 are micropho
 RATE      = 16000
 FRAME_MS  = 30
 LOG_DROP_MS = 2000     # dropped sounds at least this long are always logged
+# A sound ODAS never tracked is usually noise, but ODAS also loses a talker for seconds at a
+# time in a noisy room. From this length on the speech gate decides; 0 = always drop them.
+UNTRACKED_MS = env("STT_UNTRACKED_MIN_MS", 2000, int)
 AEC       = env("STT_AEC", "1") == "1"   # remove the board's own speaker from the microphones
 AEC_BIN   = env("STT_AEC_BIN", "/opt/rsp-stt/rsp-aec")   # native canceller (WebRTC AEC3); built-in one without it
 AEC_ARGS  = env("STT_AEC_ARGS", "")      # options for it, see rsp-aec.cc
@@ -451,6 +454,9 @@ def speech_session():
             log("warn: speech gate off (%s)" % str(e).splitlines()[0][:120])
     return GATE[0]
 
+def speech_gate_on():
+    return SPEECH_MIN_MS > 0 and np is not None and speech_session() is not None
+
 def has_speech(pcm):
     """True if Silero finds SPEECH_MIN_MS of continuous speech; stops at the first such run.
     True as well when the gate is off or unavailable."""
@@ -507,6 +513,9 @@ def handle(frames, meta):
             return
         if sim >= 0.03:
             meta = dict(meta, echo=round(sim, 2))          # kept in the record, to tune the limit
+    if meta.get("untracked") and not speech_gate_on():
+        log("drop: %.1fs untracked, and no speech gate to check it" % dur)
+        return
     if not has_speech(pcm):
         said = ""
         if SPEECH_AUDIT:
@@ -514,8 +523,9 @@ def handle(frames, meta):
                 said = " (whisper: %s)" % transcribe(pcm).replace("\n", " / ")[:80]
             except Exception:
                 pass
-        log("drop: no speech in %.1fs utterance%s%s" % (
-            dur, " az=%d" % meta["az"] if "az" in meta else "", said))
+        log("drop: no speech in %.1fs utterance%s%s%s" % (
+            dur, " az=%d" % meta["az"] if "az" in meta else "",
+            " dyn=%.1f" % meta["dyn_db"] if "dyn_db" in meta else "", said))
         return
     try:
         raw = transcribe(pcm)
@@ -638,7 +648,10 @@ class Segmenter:
             meta["t"] = round(self.n * FRAME_MS / 1000.0, 1)
             why = ""
             if self.meta and "az" not in meta:
-                why = "untracked"             # ODAS never tracked a source here: noise
+                if 0 < UNTRACKED_MS <= len(self.utt) * FRAME_MS:
+                    meta["untracked"] = True  # long enough to be a talker ODAS lost: ask the speech gate
+                else:
+                    why = "untracked"         # ODAS never tracked a source here: noise
             elif "az" in meta and ignored(meta["az"]):
                 why = "ignored direction az=%d" % meta["az"]
             lv = sorted(self.levels[:max(1, len(self.levels) - self.silence_ms // FRAME_MS)])
@@ -751,9 +764,9 @@ def capture_to(fifo):
     req, active = os.path.join(RUN_DIR, "record.req"), os.path.join(RUN_DIR, "record.active")
     rec, left, n = None, 0, 0
     aec = helper = loopback = None
-    if AEC and os.access(AEC_BIN, os.X_OK) and np is not None:
+    if native_aec():
         # the native canceller sits between this process and ODAS; recordings keep the raw capture
-        helper = subprocess.Popen([AEC_BIN] + AEC_ARGS.split(), stdin=subprocess.PIPE, stdout=out)
+        helper = subprocess.Popen(native_aec(), stdin=subprocess.PIPE, stdout=out)
         loopback = Loopback()
         log("rsp-stt: echo cancellation on (%s %s, loopback channels %d-%d)"
             % (os.path.basename(AEC_BIN), AEC_ARGS or "aec3", MICS + 1, CHANNELS))
@@ -819,6 +832,19 @@ def capture_to(fifo):
                 os.unlink(active)
                 log("record: done")
 
+def native_aec():
+    """The native canceller's command line, or None when it is off or not installed."""
+    if AEC and os.access(AEC_BIN, os.X_OK) and np is not None:
+        return [AEC_BIN] + AEC_ARGS.split()
+    return None
+
+def replay_to(fifo, path):
+    """Replay: feed a recording to ODAS through the native canceller, as the capture would be."""
+    out = open(fifo, "wb", buffering=0)                       # blocks until odaslive opens it
+    with open(path, "rb") as take:
+        subprocess.call(native_aec(), stdin=take, stdout=out)
+    out.close()
+
 def odas_command(cfg):
     return [ODAS_BIN] + ODAS_ARGS.split() + ["-c", cfg]
 
@@ -826,10 +852,11 @@ def run_odas():
     """odaslive connects out to its sinks, so listen first, then start it."""
     if not os.path.isdir(RUN_DIR):
         os.makedirs(RUN_DIR)
-    if ODAS_INPUT:
-        source = os.path.realpath(ODAS_INPUT)
-        if AEC and np is not None:
-            preload_played(source)
+    take = os.path.realpath(ODAS_INPUT) if ODAS_INPUT else None
+    if take and AEC and np is not None:
+        preload_played(take)
+    if take and not native_aec():
+        source = take
     else:
         source = os.path.join(RUN_DIR, "raw.fifo")
         if os.path.exists(source):
@@ -840,8 +867,10 @@ def run_odas():
     sep_srv = listen(ODAS_SEP_PORT)
     # ODAS reports fatal errors on stdout; keep them (they land in the journal)
     proc = subprocess.Popen(odas_command(cfg), stdout=sys.stderr)
-    if not ODAS_INPUT:
+    if not take:
         threading.Thread(target=capture_to, args=(source,), daemon=True).start()
+    elif source != take:
+        threading.Thread(target=replay_to, args=(source, take), daemon=True).start()
     for srv in (audio_srv, track_srv, sep_srv):
         srv.settimeout(20)
     try:

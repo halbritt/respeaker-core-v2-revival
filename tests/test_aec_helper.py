@@ -171,3 +171,116 @@ def test_the_build_pins_the_library_source_and_enables_neon() -> None:
     docker = (NEWOS_DIR / "cross" / "Dockerfile").read_text(encoding="utf-8")
     for pkg in ("meson", "libspeexdsp-dev:armhf"):
         assert pkg in docker
+
+
+# --- the program itself, built for this machine without the AEC3 engine ---
+
+import ctypes.util
+import shutil
+
+RATE = 16000
+DELAY = 64                              # samples rsp-aec holds the microphones back
+
+
+@pytest.fixture(scope="session")
+def rsp_aec(tmp_path_factory) -> Path:
+    if shutil.which("g++") is None:
+        pytest.skip("no g++: rsp-aec cannot be built on this host")
+    if ctypes.util.find_library("speexdsp") is None:
+        pytest.skip("libspeexdsp not installed: rsp-aec cannot be linked on this host")
+    exe = tmp_path_factory.mktemp("rsp-aec") / "rsp-aec"
+    res = subprocess.run(["g++", "-O2", "-DRSP_AEC_NO_AEC3", "-o", str(exe), str(BOARD_DIR / "rsp-aec.cc"),
+                          "-l:libspeexdsp.so.1"], capture_output=True, text=True, timeout=120, check=False)
+    assert res.returncode == 0, res.stderr
+    return exe
+
+
+def _through(exe: Path, a: np.ndarray, *args: str) -> np.ndarray:
+    res = subprocess.run([str(exe), *args], input=a.astype("<i4").tobytes(), capture_output=True, timeout=60, check=False)
+    assert res.returncode == 0, res.stderr.decode()
+    return np.frombuffer(res.stdout, dtype="<i4").reshape(-1, CH)
+
+
+def _tone(hz: float, seconds: float = 2.0, level: float = 0.1) -> np.ndarray:
+    return np.sin(2 * np.pi * hz * np.arange(int(seconds * RATE)) / RATE) * level * 2**31
+
+
+def _level_db(x: np.ndarray) -> float:
+    return 20 * np.log10(np.sqrt((x.astype(np.float64) ** 2).mean()) + 1e-9)
+
+
+def _mics(signal: np.ndarray) -> np.ndarray:
+    a = np.zeros((len(signal), CH), dtype=np.int64)
+    a[:, :6] = np.round(signal)[:, None]
+    return a
+
+
+@pytest.mark.parametrize("hz,low,high", [(50, -60, -28), (60, -60, -22), (300, -0.5, 0.1), (1000, -0.1, 0.1), (4000, -0.1, 0.1)])
+def test_hum_below_the_voice_is_removed_and_the_voice_is_not(rsp_aec: Path, hz: float, low: float, high: float) -> None:
+    """Fourth-order Butterworth at 120 Hz: 24 dB down an octave below, flat from 300 Hz up."""
+    a = _mics(_tone(hz))
+    out = _through(rsp_aec, a)
+    late = slice(RATE, 2 * RATE - 160)
+    change = _level_db(out[late, 2]) - _level_db(a[late, 2])
+    assert low <= change <= high, f"{hz} Hz changed by {change:.1f} dB"
+
+
+def test_without_filter_or_playback_the_microphones_come_out_as_they_went_in_4_ms_later(rsp_aec: Path) -> None:
+    rng = np.random.default_rng(1)
+    a = np.zeros((RATE, CH), dtype=np.int64)
+    a[:, :6] = rng.integers(-2**30, 2**30, (RATE, 6))
+    a[:, 6:] = rng.integers(-3, 4, (RATE, 2)) * 4096           # the idle loopback's noise
+    for engine in ("speex", "none"):
+        out = _through(rsp_aec, a, "--engine", engine, "--highpass", "0")
+        assert len(out) == len(a)
+        assert np.array_equal(out[DELAY:, :6], a[:-DELAY, :6]), engine
+        assert np.array_equal(out[:, 6:], a[:, 6:]), "the loopback channels pass through"
+
+
+def test_the_loopback_channels_are_never_filtered(rsp_aec: Path) -> None:
+    a = _mics(_tone(60))
+    a[:, 6] = a[:, 7] = np.round(_tone(60, level=0.02))
+    out = _through(rsp_aec, a, "--engine", "none")
+    assert np.array_equal(out[:, 6:], a[:, 6:])
+
+
+def test_the_speex_engine_removes_the_speaker_from_the_microphones(rsp_aec: Path) -> None:
+    """Same synthetic room as the built-in canceller's test: a known echo of a known signal."""
+    rng = np.random.default_rng(3)
+    n = 12 * RATE
+    x = rng.standard_normal(n)
+    spec = np.fft.rfft(x)
+    f = np.fft.rfftfreq(n, 1 / RATE)
+    spec[(f < 300) | (f > 3500)] = 0
+    ref = np.fft.irfft(spec, n)
+    ref = ref / np.abs(ref).max() * 0.04
+    h = np.zeros(400)
+    h[12], h[19], h[43], h[132] = 1.0, 0.5, -0.3, 0.15
+    echo = np.convolve(ref, h)[:n] * 6.0
+    a = _mics(echo * 2**31)
+    a[:, 6] = a[:, 7] = np.round(ref * 2**31)
+    out = _through(rsp_aec, a, "--engine", "speex", "--highpass", "0")
+    late = slice(8 * RATE, 11 * RATE)
+    removed = _level_db(a[late, 0]) - _level_db(out[late, 0])
+    assert removed > 12, f"only {removed:.1f} dB of the echo removed"
+
+
+def test_replay_feeds_a_recording_to_odas_through_the_same_canceller(rsp_stt_loader, tmp_path: Path) -> None:
+    """A recording holds the raw capture. Replayed, it must reach ODAS as it would have live:
+    filtered and with the speaker removed, or a take proves nothing about the live service."""
+    import threading
+
+    stt = rsp_stt_loader(env={"STT_AEC_BIN": str(_fake(tmp_path))})
+    take = tmp_path / "take.raw"
+    take.write_bytes(_capture())
+    fifo = tmp_path / "raw.fifo"
+    os.mkfifo(fifo)
+    got: list[bytes] = []
+    reader = threading.Thread(target=lambda: got.append(open(fifo, "rb").read()))
+    reader.start()
+    stt.replay_to(str(fifo), str(take))
+    reader.join(20)
+    assert not reader.is_alive(), "ODAS must see the end of the recording"
+    want = np.frombuffer(_capture(), dtype="<i4").reshape(-1, CH).copy()
+    want[:, :6] = -want[:, :6]
+    assert np.array_equal(np.frombuffer(got[0], dtype="<i4").reshape(-1, CH), want)
