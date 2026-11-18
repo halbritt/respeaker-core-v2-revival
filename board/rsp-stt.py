@@ -41,6 +41,11 @@ MICS      = env("STT_MICS", 6, int)            # channels 0..MICS-1 are micropho
 RATE      = 16000
 FRAME_MS  = 30
 LOG_DROP_MS = 2000     # dropped sounds at least this long are always logged
+AEC       = env("STT_AEC", "1") == "1"   # remove the board's own speaker from the microphones
+ECHO_SIM  = env("STT_ECHO_SHARE", 0.1, float)   # utterances with this share of played sound in them are the board's own voice
+ECHO_CLEAR = 0.2       # share at which an utterance teaches where the speaker is
+ECHO_AZ   = env("STT_ECHO_AZ", 25, float)   # degrees round the speaker's direction treated as the speaker while it plays
+PLAYBACK  = [0.0]                        # when the speaker was last heard playing (time.time())
 DIR_STEP  = 15         # degrees a talker must move before speech_dir is published again
 LANGUAGE  = env("STT_LANGUAGE", "en")
 START_RATIO = env("STT_START_RATIO", 3.0, float)   # speech = rms > noise floor * ratio
@@ -113,6 +118,143 @@ JUNK = ("[BLANK_AUDIO]", "[ Silence ]", "[silence]", "(silence)", "[MUSIC]", "[M
 
 def log(msg):
     sys.stdout.write(msg + "\n"); sys.stdout.flush()
+
+class EchoCanceller:
+    """Removes the board's own speaker from the microphone channels of the raw capture.
+
+    The card's channels after the microphones are a loopback of what the speaker plays. One
+    adaptive filter per microphone (libspeexdsp) learns how that reaches the microphone and
+    subtracts it. Blocks are passed through untouched while the loopback is silent, so
+    normal listening costs nothing and cannot be altered by this."""
+    FRAME, TAIL, HOLD = 160, 1600, 10          # 10 ms frames, 100 ms of room, blocks kept active after
+
+    def __init__(self):
+        import ctypes, ctypes.util
+        if np is None:
+            raise RuntimeError("numpy is needed")
+        self.ct = ctypes
+        lib = ctypes.CDLL(ctypes.util.find_library("speexdsp") or "libspeexdsp.so.1")
+        lib.speex_echo_state_init.restype = ctypes.c_void_p
+        lib.speex_echo_state_init.argtypes = [ctypes.c_int, ctypes.c_int]
+        lib.speex_echo_cancellation.argtypes = [ctypes.c_void_p] * 4
+        lib.speex_echo_ctl.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+        self.lib, self.states = lib, []
+        for _ in range(MICS):
+            st = lib.speex_echo_state_init(self.FRAME, self.TAIL)
+            rate = ctypes.c_int(RATE)
+            lib.speex_echo_ctl(st, 24, ctypes.byref(rate))        # SPEEX_ECHO_SET_SAMPLING_RATE
+            self.states.append(st)
+        self.hold = 0
+        self.active = False                     # the speaker is playing, or stopped a moment ago
+
+    def process(self, raw):
+        a = np.frombuffer(raw, dtype="<i4").reshape(-1, CHANNELS)
+        ref = a[:, MICS:].sum(axis=1, dtype=np.int64)
+        if ref.any():
+            self.hold = self.HOLD
+        elif self.hold > 0:
+            self.hold -= 1                      # the room rings on after the speaker stops
+        else:
+            self.active = False
+            PLAYED.add(None)
+            return raw
+        self.active = True
+        if len(a) % self.FRAME:
+            PLAYED.add(None)
+            return raw
+        # the loopback is quiet: 16-bit with 12 dB of gain; the filter adapts to any level
+        play = np.ascontiguousarray(np.clip(ref >> 13, -32768, 32767).astype(np.int16))
+        PLAYED.add(play)
+        out = a.copy()
+        cleaned = np.zeros(self.FRAME, np.int16)
+        for c, st in enumerate(self.states):
+            mic = np.ascontiguousarray(np.clip(a[:, c] >> 16, -32768, 32767).astype(np.int16))
+            echo = np.zeros(len(a), np.int64)
+            for i in range(0, len(a), self.FRAME):
+                self.lib.speex_echo_cancellation(st, mic[i:i + self.FRAME].ctypes.data,
+                                                 play[i:i + self.FRAME].ctypes.data, cleaned.ctypes.data)
+                echo[i:i + self.FRAME] = mic[i:i + self.FRAME].astype(np.int64) - cleaned
+            # subtract the estimated echo from the full-precision samples
+            out[:, c] = np.clip(a[:, c].astype(np.int64) - (echo << 16), -2**31, 2**31 - 1)
+        return out.astype("<i4").tobytes()
+
+class PlayedLog:
+    """What the speaker played, kept to recognise the board's own voice in an utterance.
+
+    Echo cancellation weakens the speaker's sound in the microphones but leaves some. What
+    is left is still the played signal passed through the room, so it is coherent with it,
+    frequency by frequency; a person talking is not, even while the speaker plays."""
+    BLOCK = RATE * 30 // 1000
+    BEHIND, AHEAD = 70, 10                     # utterance vs capture position: up to 2.1 s late, 0.3 s early
+    SEG = 4096                                 # 256 ms analysis window, longer than the room's echo
+
+    def __init__(self):
+        self.blocks = collections.deque(maxlen=4000)       # two minutes; None = speaker silent
+        self.n = 0                                         # blocks seen since the start
+
+    def add(self, samples):
+        """samples: int16 array of one 30 ms block, or None when the speaker was silent."""
+        self.blocks.append(None if samples is None else np.array(samples, dtype=np.int16))
+        self.n += 1
+
+    def similarity(self, pcm, end_s):
+        """0..1: the share of an utterance's energy that is the played sound.
+        pcm: mono 16-bit utterance; end_s: stream time in seconds at which it ended."""
+        if np is None:
+            return 0.0
+        y = np.frombuffer(pcm, dtype="<i2").astype(np.float64)
+        m = len(y) // self.BLOCK
+        hi = int(round(end_s * 1000 / 30)) + self.AHEAD
+        lo = hi - self.AHEAD - m - self.BEHIND
+        base = self.n - len(self.blocks)                   # stream position of blocks[0]
+        lo, hi = max(lo, base), min(hi, self.n)
+        if m < 10 or hi - lo < m:
+            return 0.0
+        part = [self.blocks[k - base] for k in range(lo, hi)]
+        if sum(b is not None for b in part) < 0.2 * m:
+            return 0.0                                     # the speaker was silent for nearly all of it
+        zero = np.zeros(self.BLOCK, np.int16)
+        x = np.concatenate([zero if b is None else b for b in part]).astype(np.float64)
+        y = y[:m * self.BLOCK]
+        # where in the played sound the utterance fits best
+        size = 1 << int(np.ceil(np.log2(len(x) + len(y))))
+        cc = np.fft.irfft(np.fft.rfft(x, size) * np.conj(np.fft.rfft(y, size)), size)[:len(x) - len(y) + 1]
+        x = x[int(np.argmax(np.abs(cc))):][:len(y)]
+        # magnitude-squared coherence over the speech band, weighted by the utterance's spectrum
+        win, hop = np.hanning(self.SEG), self.SEG // 2
+        pxx = pyy = pxy = 0
+        segs = 0
+        for i in range(0, len(y) - self.SEG + 1, hop):
+            fx, fy = np.fft.rfft(x[i:i + self.SEG] * win), np.fft.rfft(y[i:i + self.SEG] * win)
+            pxx, pyy, pxy = pxx + np.abs(fx) ** 2, pyy + np.abs(fy) ** 2, pxy + fx * np.conj(fy)
+            segs += 1
+        if segs < 2:
+            return 0.0
+        band = slice(300 * self.SEG // RATE, 3500 * self.SEG // RATE)
+        coh = np.abs(pxy[band]) ** 2 / (pxx[band] * pyy[band] + 1e-9)
+        share = float((coh * pyy[band]).sum() / (pyy[band].sum() + 1e-9))
+        # unrelated signals still show some coherence when few windows are averaged
+        # (about 1/segs, more with overlapping windows): take that chance level off
+        return max(0.0, share - 1.5 / segs)
+
+    def overlap(self, nbytes, end_s):
+        """0..1: how much of an utterance's time the speaker was playing."""
+        m = nbytes // 2 // self.BLOCK
+        hi = int(round(end_s * 1000 / 30)) - 10            # the utterance trails the capture a little
+        base = self.n - len(self.blocks)
+        span = [self.blocks[k - base] for k in range(max(hi - m, base), min(hi, self.n))]
+        return sum(b is not None for b in span) / float(m) if m else 0.0
+
+PLAYED = PlayedLog()
+SPEAKER_AZ = collections.deque(maxlen=8)   # directions of utterances that clearly were the speaker
+
+def from_speaker(az):
+    """Is az where the board's own speaker has been heard from?"""
+    if not SPEAKER_AZ:
+        return False
+    mean = math.degrees(math.atan2(sum(math.sin(math.radians(a)) for a in SPEAKER_AZ),
+                                   sum(math.cos(math.radians(a)) for a in SPEAKER_AZ)))
+    return abs((az - mean + 180) % 360 - 180) <= ECHO_AZ
 
 def wav_bytes(pcm):
     buf = io.BytesIO()
@@ -202,6 +344,8 @@ def emit(text, dur, latency, meta):
            "audio_s": round(dur, 2), "stt_s": round(latency, 2)}
     rec.update(meta)
     where = " az=%d" % meta["az"] if "az" in meta else ""
+    if "echo" in meta:
+        where += " echo=%.2f" % meta["echo"]
     log("[%s] (%.1fs audio, %.2fs stt%s) %s" % (rec["ts"], dur, latency, where, text))
     publish("utterance", rec)
     try:
@@ -308,6 +452,21 @@ def handle(frames, meta):
     pcm = b"".join(f[0] for f in frames) if ab else b"".join(frames)
     dur = len(pcm) / 2.0 / RATE
     t0 = time.time()
+    if AEC and "t" in meta:
+        sim = PLAYED.similarity(pcm, meta["t"])
+        az = meta.get("az")
+        if sim >= ECHO_CLEAR and az is not None:
+            SPEAKER_AZ.append(az)                          # this is where the speaker is heard from
+        # a distorted voice leaves little that still matches; then direction and timing decide
+        there = (az is not None and from_speaker(az) and sim >= 0.03
+                 and PLAYED.overlap(len(pcm), meta["t"]) >= 0.6)
+        if sim >= ECHO_SIM or there:
+            log("drop: own speaker in %.1fs utterance%s (%.0f%% of it is what was played%s)" % (
+                dur, " az=%d" % az if az is not None else "", sim * 100,
+                ", from the speaker's direction" if sim < ECHO_SIM else ""))
+            return
+        if sim >= 0.03:
+            meta = dict(meta, echo=round(sim, 2))          # kept in the record, to tune the limit
     if not has_speech(pcm):
         said = ""
         if SPEECH_AUDIT:
@@ -551,6 +710,13 @@ def capture_to(fifo):
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)      # only now, or the card overruns
     req, active = os.path.join(RUN_DIR, "record.req"), os.path.join(RUN_DIR, "record.active")
     rec, left, n = None, 0, 0
+    aec = None
+    if AEC:
+        try:
+            aec = EchoCanceller()
+            log("rsp-stt: echo cancellation on (loopback channels %d-%d)" % (MICS + 1, CHANNELS))
+        except Exception as e:
+            log("warn: echo cancellation unavailable: %s" % e)
     try:
         os.unlink(active)
     except OSError:
@@ -560,7 +726,12 @@ def capture_to(fifo):
         if not raw:
             log("error: arecord ended (exit %s)" % proc.poll())
             os._exit(1)                                       # let systemd restart everything
-        out.write(raw)
+        if aec is not None:
+            out.write(aec.process(raw))                       # recordings below keep the raw capture
+            if aec.active:
+                PLAYBACK[0] = time.time()
+        else:
+            out.write(raw)
         n += 1
         if rec is None and n % 10 == 0 and os.path.exists(req):
             try:

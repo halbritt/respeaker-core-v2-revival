@@ -150,6 +150,24 @@ playback runs at 16 kHz and ALSA converts. The codec driver is an Armbian kernel
 mainline. Tested by playing a tone and finding it in the microphone capture, which carried on
 without a gap.
 
+### Not hearing itself
+
+The sound card's last two channels are a loopback of what the speaker plays. `rsp-stt` uses
+them in two stages (`STT_AEC=0` turns both off):
+
+1. **Cancellation.** One adaptive filter per microphone (libspeexdsp) subtracts the speaker's
+   sound from the raw capture before ODAS sees it: about 15 dB once adapted. Blocks pass
+   through untouched while the speaker is silent, so normal listening is unchanged and costs
+   nothing.
+2. **Recognising the leftover.** What remains can still be loud enough to transcribe. An
+   utterance is dropped as the board's own voice when enough of its energy is coherent with
+   what was played (`STT_ECHO_SHARE`, default 0.1), or when it overlaps playback and comes
+   from the direction the speaker has been heard from (`STT_ECHO_AZ`, default 25 degrees;
+   the direction is learned from the clear cases). Dropped utterances are logged as
+   `drop: own speaker`.
+
+Someone talking from elsewhere in the room while the board speaks is kept.
+
 ## ODAS
 
 Built from introlab/odas commit 004cb82 plus `newos/cross/patches/`, which
@@ -232,8 +250,9 @@ the command line means `bringup`.
   running board was brought up step by step.
 - The new OS runs from the SD card. The eMMC works under 6.18 (clock limited to 37.5 MHz),
   but installing to it is not scripted.
-- Echo cancellation and a local wake-word model are not set up: the board hears and
-  transcribes whatever its own speaker plays.
+- A local wake-word model is not set up.
+- Echo handling is new and tested with two synthetic voices only; talking over the board
+  while it speaks (barge-in) has not been tried by a person.
   The loopback channels are captured but unused.
 - The kernel's USB PHY use-after-free (see above) is worked around in the device tree; a fix
   for the driver is in `newos/port/patches/` and has not been sent upstream.
