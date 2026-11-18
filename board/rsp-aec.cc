@@ -8,7 +8,7 @@
 // that the echo is clearly later than the loopback; AEC3 cannot model the board's own
 // speaker otherwise, it sits too close.
 //
-// Two things happen to the microphones:
+// Three things happen to the microphones:
 //
 // 1. A high-pass filter (--highpass HZ, default 120, 0 = off; fourth-order Butterworth).
 //    Steady sound below the voice (hum, rumble, low noise) is loud and easy to localise, so
@@ -35,6 +35,11 @@
 // than 10 ms blocks at the same cancellation), aec3 and none in blocks of 10 ms.
 //
 // Built with -DRSP_AEC_NO_AEC3 the aec3 engine is left out (the host tests build it so).
+//
+// 3. Gain (--gain DB, default 0), after the other two. The speaker is so much louder than
+//    a talker that it clipped the converters at the gain a talker needs (24 dB: samples
+//    piled up just under 0.9 of full scale). The converters therefore run 10 dB lower and
+//    the level is restored here, where the speaker's sound has already been reduced.
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -135,6 +140,7 @@ int main(int argc, char **argv) {
     double gentle = 16;
     int tail = 0;
     double highpass = 120;
+    double gain_db = 0;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--engine" && i + 1 < argc) engine = argv[++i];
@@ -142,11 +148,13 @@ int main(int argc, char **argv) {
         else if (a == "--gentle" && i + 1 < argc) gentle = atof(argv[++i]);
         else if (a == "--tail" && i + 1 < argc) tail = atoi(argv[++i]);
         else if (a == "--highpass" && i + 1 < argc) highpass = atof(argv[++i]);
+        else if (a == "--gain" && i + 1 < argc) gain_db = atof(argv[++i]);
         else {
-            fprintf(stderr, "usage: rsp-aec [--engine aec3|speex|none] [--linear] [--gentle N] [--tail N] [--highpass HZ]  (8 ch S32LE 16 kHz, stdin to stdout)\n");
+            fprintf(stderr, "usage: rsp-aec [--engine aec3|speex|none] [--linear] [--gentle N] [--tail N] [--highpass HZ] [--gain DB]  (8 ch S32LE 16 kHz, stdin to stdout)\n");
             return 2;
         }
     }
+    const double gain = std::pow(10.0, gain_db / 20.0);
 #ifdef RSP_AEC_NO_AEC3
     if (engine == "aec3") engine = "none";
 #endif
@@ -265,6 +273,9 @@ int main(int argc, char **argv) {
             }
         }
 #endif
+        if (gain != 1.0)
+            for (int i = 0; i < FRAME; i++)
+                for (int c = 0; c < MICS; c++) out[i * CH + c] = to_s32(out[i * CH + c] * gain);
         for (int i = 0; i < FRAME; i++) {
             out[i * CH + 6] = in[i * CH + 6];
             out[i * CH + 7] = in[i * CH + 7];

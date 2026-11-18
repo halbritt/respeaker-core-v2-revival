@@ -238,6 +238,22 @@ def test_without_filter_or_playback_the_microphones_come_out_as_they_went_in_4_m
         assert np.array_equal(out[:, 6:], a[:n, 6:]), "the loopback channels pass through"
 
 
+def test_gain_raises_the_microphones_and_leaves_the_loopback(rsp_aec: Path) -> None:
+    """The converters run 10 dB lower so the speaker cannot clip them; --gain restores the level."""
+    a = _mics(_tone(1000, level=0.05))
+    a[:, 6] = a[:, 7] = np.round(_tone(700, level=0.02))
+    out = _through(rsp_aec, a, "--engine", "none", "--highpass", "0", "--gain", "10")
+    late = slice(RATE, 2 * RATE - 160)
+    assert abs(_level_db(out[late, 3]) - _level_db(a[late, 3]) - 10) < 0.05
+    assert np.array_equal(out[:, 6:], a[:len(out), 6:])
+
+
+def test_gain_saturates_instead_of_wrapping_round(rsp_aec: Path) -> None:
+    a = _mics(_tone(1000, level=0.6))
+    out = _through(rsp_aec, a, "--engine", "none", "--highpass", "0", "--gain", "10")
+    assert out[:, 0].max() == 2**31 - 1 and out[:, 0].min() == -2**31
+
+
 def test_the_loopback_channels_are_never_filtered(rsp_aec: Path) -> None:
     a = _mics(_tone(60))
     a[:, 6] = a[:, 7] = np.round(_tone(60, level=0.02))

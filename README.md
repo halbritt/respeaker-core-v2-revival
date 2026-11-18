@@ -371,7 +371,16 @@ the command line means `bringup`.
   0.90-0.95 of full scale while the board speaks at its usual volume.
 - The kernel's USB PHY use-after-free (see above) is worked around in the device tree; a fix
   for the driver is in `newos/port/patches/` and has not been sent upstream.
-- Mic gain is 24 dB: at 28 dB a talker close to the board peaked at -0.8 dBFS. Not calibrated further.
+- Mic gain is 14 dB at the converters, and `rsp-aec --gain 10` (in `STT_AEC_ARGS`) raises
+  the microphones by 10 dB after cancellation, so a talker has the level they had at 24 dB.
+  At 24 dB the board's own speaker clipped the converters (tens of thousands of samples
+  piled up just under 0.9 of full scale on the two microphones nearest the speaker), and a
+  clipped echo cannot be cancelled. At 14 dB the peaks were 0.34 to 0.63 of full scale and
+  the canceller removed 16 to 17 dB of the speaker, against 8 to 11 dB on the clipped takes
+  (different texts, 21 s against 65 s). The noise floor fell with the gain, so quiet speech
+  should lose nothing; that was measured in a room with people talking, not in silence.
+  With `STT_AEC=0` or without `rsp-aec` there is no make-up gain and the level thresholds
+  are 10 dB too high.
 
 ## Licences
 
