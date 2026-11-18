@@ -179,18 +179,36 @@ without a gap.
 The sound card's last two channels are a loopback of what the speaker plays. Two stages use
 them (`STT_AEC=0` turns both off):
 
-1. **Cancellation.** `rsp-aec` sits between the capture and ODAS and removes the speaker from
-   the six microphone channels with WebRTC's AEC3: an adaptive filter per microphone and one
-   suppression gain common to all six, so the differences between the microphones that the
-   direction finder needs survive. While the loopback is idle it computes nothing and passes
-   the microphones on unchanged (delayed by 4 ms, see below). Without `/opt/rsp-stt/rsp-aec`
-   the service falls back to a built-in canceller (libspeexdsp through ctypes, filters only).
-2. **Recognising the leftover.** An utterance is dropped as the board's own voice when enough
-   of its energy is coherent with what was played (`STT_ECHO_SHARE`, default 0.1), or when it
-   overlaps playback and comes from the direction the speaker has been heard from
-   (`STT_ECHO_AZ`, default 25 degrees; the direction is learned from the clear cases).
-   Dropped utterances are logged as `drop: own speaker`. With AEC3 this is a safety net: on
-   a ten-minute take with 85 s of playback it caught three to five leftovers.
+1. **Cancellation.** `rsp-aec` sits between the capture and ODAS and subtracts the speaker
+   from the six microphone channels with the Speex echo canceller, one adaptive filter per
+   microphone. It takes off about 13 dB and leaves a person's voice as it was, so ODAS can
+   still find them. While the loopback is idle it computes nothing and passes the
+   microphones on unchanged (delayed by 4 ms, see below). `STT_AEC_ARGS="--engine aec3"`
+   selects WebRTC's AEC3, which removes the speaker almost completely and a quieter
+   talker with it. Without `/opt/rsp-stt/rsp-aec` the service falls back to a built-in
+   canceller (libspeexdsp through ctypes).
+2. **Recognising the leftover.** What is left of the speaker is still intelligible, so an
+   utterance is dropped as the board's own voice (`drop: own speaker` in the log) when
+   - it has no direction or comes from the speaker's direction (`STT_SPEAKER_AZ`, 185
+     degrees on this board, within `STT_ECHO_AZ`, default 25), and a tenth of its energy is
+     coherent with what was played (`STT_ECHO_SHARE`), or it overlaps playback at all;
+   - it comes from anywhere else and half of it is what was played
+     (`STT_ECHO_SHARE_ELSEWHERE`). Below that it is a person talking over the board.
+
+**Talking over the board, measured with a person** (2026-11-18): the board read a 70-second
+text at its usual volume while someone across the room spoke over it. At the microphones the
+speaker was 25 dB louder than the person. With AEC3 and the single 10% limit, nothing they
+said reached a transcript until the board stopped. With Speex and the direction rule, their
+sentences did, from their direction, with 35-45% of each utterance being played sound; a few
+of the board's own words came along ("Chandlery", and the board's first sentence joined to
+the person's first remark). The same settings on a take of the board speaking alone for 85 s
+let one word through ("So"). This is one person, one room and one take; the 50% limit sits
+between 45% (person over board) and 49-76% (board alone, tracked at a reflection), which is
+not much room.
+
+The earlier comparison below was made by adding recordings together, and it pointed the
+other way for a quiet talker: it did not show that AEC3's suppressor leaves ODAS nothing to
+steer to.
 
 Measured on the board (2026-11-18) with a recording of the board reading a poem aloud at a
 loud setting, and a recording of a person reading in the same room, replayed through ODAS and Whisper.
@@ -205,6 +223,23 @@ The two were also added together at different levels to test talking over the sp
 | Person 17 dB quieter (the recording as made) | not usable | not usable |
 | CPU while the speaker plays | about 70% of a core (in Python) | about 55% |
 | CPU while it is silent | none | under 1% |
+
+Speex inside `rsp-aec` costs about 16% of a core while the speaker plays (Debian's library
+in the same program: 27%). What was tried, on a 110 s take with 70 s of playback, six
+microphones, same cancellation (13 dB) in every case:
+
+| Build of the Speex canceller | CPU seconds |
+|---|---|
+| Debian's libspeexdsp, or the source at `-O2` | 19.9-20.2 |
+| `-O3 -ffast-math` (the compiler vectorises the filter loops with NEON) | 14.7 |
+| the same with 16 ms blocks (a 512-point transform in place of 320) | 12.3 |
+| the same with hand-written NEON for the four filter loops | 12.1 |
+| FFTW (NEON) in place of Speex's own FFT, 10 ms / 16 ms blocks | 14.2 / 12.5 |
+| fixed-point build | 20.2 |
+
+The third row is what ships. FFTW as built into Speex also plans with `FFTW_PATIENT`, which
+took three minutes at start-up on this board. Speex's `--enable-neon` only covers its
+resampler.
 
 Things that matter when changing any of this:
 
@@ -318,9 +353,10 @@ the command line means `bringup`.
 - Speech in loud steady noise: with noise in the speech band within about 5 dB of the
   talker, a fifth to a third of the words were still lost (see the hum measurements under "Audio
   pipeline"). All of this was measured with one talker and one noise source.
-- Talking over the board while it speaks (barge-in) only works when the talker is about as
-  loud as the speaker at the microphones; see "Not hearing itself". It was measured by adding
-  recordings together, not yet by a person talking over the speaker.
+- Talking over the board while it speaks (barge-in) worked in one live test with one person
+  (see "Not hearing itself"); some of the board's own words end up in that person's
+  transcript, and the limit that tells the two apart has little margin. The microphones
+  peak at 0.90-0.95 of full scale while the board speaks at its usual volume.
 - The kernel's USB PHY use-after-free (see above) is worked around in the device tree; a fix
   for the driver is in `newos/port/patches/` and has not been sent upstream.
 - Mic gain is 24 dB: at 28 dB a talker close to the board peaked at -0.8 dBFS. Not calibrated further.

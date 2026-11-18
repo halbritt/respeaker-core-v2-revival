@@ -48,7 +48,8 @@ AEC       = env("STT_AEC", "1") == "1"   # remove the board's own speaker from t
 AEC_BIN   = env("STT_AEC_BIN", "/opt/rsp-stt/rsp-aec")   # native canceller (WebRTC AEC3); built-in one without it
 AEC_ARGS  = env("STT_AEC_ARGS", "")      # options for it, see rsp-aec.cc
 ECHO_SIM  = env("STT_ECHO_SHARE", 0.1, float)   # utterances with this share of played sound in them are the board's own voice
-ECHO_CLEAR = 0.2       # share at which an utterance teaches where the speaker is
+ECHO_FAR  = env("STT_ECHO_SHARE_ELSEWHERE", 0.5, float)   # the same limit for a tracked sound away from the speaker's direction: a person talking over the board
+SPEAKER_AZ_SET = env("STT_SPEAKER_AZ", "")   # direction (degrees) the board's own speaker is heard from; empty = learn it
 ECHO_AZ   = env("STT_ECHO_AZ", 25, float)   # degrees round the speaker's direction treated as the speaker while it plays
 PLAYBACK  = [0.0]                        # when the speaker was last heard playing (time.time())
 DIR_STEP  = 15         # degrees a talker must move before speech_dir is published again
@@ -293,6 +294,8 @@ SPEAKER_AZ = collections.deque(maxlen=8)   # directions of utterances that clear
 
 def from_speaker(az):
     """Is az where the board's own speaker has been heard from?"""
+    if SPEAKER_AZ_SET != "":
+        return abs((az - float(SPEAKER_AZ_SET) + 180) % 360 - 180) <= ECHO_AZ
     if not SPEAKER_AZ:
         return False
     mean = math.degrees(math.atan2(sum(math.sin(math.radians(a)) for a in SPEAKER_AZ),
@@ -501,12 +504,16 @@ def handle(frames, meta):
     if AEC and "t" in meta:
         sim = PLAYED.similarity(pcm, meta["t"])
         az = meta.get("az")
-        if sim >= ECHO_CLEAR and az is not None:
+        if sim >= ECHO_FAR and az is not None:
             SPEAKER_AZ.append(az)                          # this is where the speaker is heard from
         # a distorted voice leaves little that still matches; then direction and timing decide
-        there = (az is not None and from_speaker(az) and sim >= 0.03
-                 and PLAYED.overlap(len(pcm), meta["t"]) >= 0.6)
-        if sim >= ECHO_SIM or there:
+        near = az is not None and from_speaker(az)
+        there = near and sim >= 0.03 and PLAYED.overlap(len(pcm), meta["t"]) >= 0.6
+        # A tracked sound from somewhere else is a person, with the speaker's leftover under
+        # them, until most of it is what was played. This needs to know where the speaker is.
+        known = SPEAKER_AZ_SET != "" or bool(SPEAKER_AZ)
+        limit = ECHO_FAR if az is not None and known and not near else ECHO_SIM
+        if sim >= limit or there:
             log("drop: own speaker in %.1fs utterance%s (%.0f%% of it is what was played%s)" % (
                 dur, " az=%d" % az if az is not None else "", sim * 100,
                 ", from the speaker's direction" if sim < ECHO_SIM else ""))
@@ -769,7 +776,7 @@ def capture_to(fifo):
         helper = subprocess.Popen(native_aec(), stdin=subprocess.PIPE, stdout=out)
         loopback = Loopback()
         log("rsp-stt: echo cancellation on (%s %s, loopback channels %d-%d)"
-            % (os.path.basename(AEC_BIN), AEC_ARGS or "aec3", MICS + 1, CHANNELS))
+            % (os.path.basename(AEC_BIN), AEC_ARGS or "speex", MICS + 1, CHANNELS))
     elif AEC:
         try:
             aec = EchoCanceller()

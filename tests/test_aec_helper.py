@@ -232,9 +232,10 @@ def test_without_filter_or_playback_the_microphones_come_out_as_they_went_in_4_m
     a[:, 6:] = rng.integers(-3, 4, (RATE, 2)) * 4096           # the idle loopback's noise
     for engine in ("speex", "none"):
         out = _through(rsp_aec, a, "--engine", engine, "--highpass", "0")
-        assert len(out) == len(a)
-        assert np.array_equal(out[DELAY:, :6], a[:-DELAY, :6]), engine
-        assert np.array_equal(out[:, 6:], a[:, 6:]), "the loopback channels pass through"
+        n = len(out)                     # whole blocks only: 16 ms for speex, 10 ms otherwise
+        assert len(a) - 256 < n <= len(a), engine
+        assert np.array_equal(out[DELAY:, :6], a[:n - DELAY, :6]), engine
+        assert np.array_equal(out[:, 6:], a[:n, 6:]), "the loopback channels pass through"
 
 
 def test_the_loopback_channels_are_never_filtered(rsp_aec: Path) -> None:

@@ -280,3 +280,64 @@ def test_replaying_a_recording_knows_what_the_speaker_played_in_it(rsp_stt_loade
     assert stt.PLAYED.n == len(raw) // (BLOCK * CH * 4)
     assert stt.PLAYED.blocks[10] is None and stt.PLAYED.blocks[166] is not None   # 0.3 s idle, 5 s playing
     assert _handle(stt, monkeypatch, heard[RATE : 7 * RATE], end_s=9.0) == [], "the board's own voice was sent to Whisper"
+
+
+# --- talking over the board from across the room: the leftover is a large part of the utterance ---
+
+
+def _over_the_speaker(heard: np.ndarray, seed: int, share: float) -> np.ndarray:
+    """A talker with the board's leftover under them; the leftover is `share` of the energy."""
+    seg = heard[RATE : 7 * RATE]
+    other = _speechlike(6, seed=seed, level=0.3)
+    return seg * (np.sqrt(share / (1 - share)) * other.std() / seg.std()) + other
+
+
+def test_a_talker_elsewhere_is_kept_with_a_lot_of_the_speaker_under_them(rsp_stt_loader, monkeypatch) -> None:
+    """Measured on the board: a person across the room while it spoke 25 dB louder gave 35-45%."""
+    stt = rsp_stt_loader(env={"STT_SPEAKER_AZ": "185"})
+    ref, heard = _scene()
+    _play(stt, ref)
+    assert _hand(stt, monkeypatch, _over_the_speaker(heard, 60, 0.4), 7.0, az=65)
+
+
+def test_mostly_speaker_is_dropped_wherever_it_seems_to_come_from(rsp_stt_loader, monkeypatch) -> None:
+    """The board alone was sometimes tracked at a reflection, with 69-76% of it played sound."""
+    stt = rsp_stt_loader(env={"STT_SPEAKER_AZ": "185"})
+    ref, heard = _scene()
+    _play(stt, ref)
+    assert not _hand(stt, monkeypatch, _over_the_speaker(heard, 61, 0.75), 7.0, az=65)
+
+
+def test_the_same_mix_without_a_direction_is_dropped(rsp_stt_loader, monkeypatch) -> None:
+    """Untracked sound has no direction to speak for it: the strict limit applies."""
+    stt = rsp_stt_loader(env={"STT_SPEAKER_AZ": "185"})
+    ref, heard = _scene()
+    _play(stt, ref)
+    calls: list[int] = []
+    monkeypatch.setattr(stt, "transcribe", lambda pcm: calls.append(len(pcm)) or "some words")
+    monkeypatch.setattr(stt, "has_speech", lambda pcm: True)
+    monkeypatch.setattr(stt, "speech_gate_on", lambda: True)
+    stt.handle(_pcm16(_over_the_speaker(heard, 60, 0.4)), {"t": 7.0, "untracked": True})
+    assert calls == []
+
+
+def test_the_same_mix_from_the_speakers_direction_is_dropped(rsp_stt_loader, monkeypatch) -> None:
+    stt = rsp_stt_loader(env={"STT_SPEAKER_AZ": "185"})
+    ref, heard = _scene()
+    _play(stt, ref)
+    assert not _hand(stt, monkeypatch, _over_the_speaker(heard, 60, 0.4), 7.0, az=178)
+
+
+def test_a_configured_speaker_direction_needs_no_learning(rsp_stt_loader, monkeypatch) -> None:
+    stt = rsp_stt_loader(env={"STT_SPEAKER_AZ": "185"})
+    ref, heard = _scene()
+    _play(stt, ref)
+    assert not _hand(stt, monkeypatch, _faint_leftover(heard, seed=50), 7.0, az=190)
+
+
+def test_a_reflection_does_not_move_the_configured_speaker_direction(rsp_stt_loader, monkeypatch) -> None:
+    stt = rsp_stt_loader(env={"STT_SPEAKER_AZ": "185"})
+    ref, heard = _scene()
+    _play(stt, ref)
+    assert not _hand(stt, monkeypatch, heard[RATE : 7 * RATE], 7.0, az=70)       # clear echo, heard off a wall
+    assert _hand(stt, monkeypatch, _over_the_speaker(heard, 62, 0.4), 7.0, az=65), "the talker near that wall is kept"

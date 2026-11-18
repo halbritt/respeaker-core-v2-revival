@@ -16,9 +16,12 @@
 //    brown noise from another speaker added to recorded speech: without the filter a sentence was lost, with it none.
 // 2. Echo cancellation, only while the loopback is not idle (it is never silent, but a few
 //    steps of noise):
+//    speex   libspeexdsp, one adaptive filter per microphone, no suppressor. Default: with a
+//            person talking across the room while the board spoke 25 dB louder, their words
+//            still reached the transcript; with aec3 only fragments did.
 //    aec3    WebRTC AEC3, one instance for all six microphones: an adaptive filter per
-//            microphone and one common suppression gain, which keeps the differences
-//            between the microphones that the direction finder needs. Default.
+//            microphone and one common suppression gain. It removes the speaker's voice
+//            almost completely, and a quieter talker with it.
 //    --linear      aec3: only the adaptive filters, without the suppressor
 //    --gentle N    aec3: let N times more echo through before suppressing. 1 is the
 //                  library's own tuning, made for a talker louder than the echo. Default 16:
@@ -26,8 +29,10 @@
 //                  transcript, and more of a person talking over it survived. At 64 the
 //                  speaker's voice came through.
 //    --tail N      aec3: adaptive filter length in blocks of 4 ms (default 13)
-//    speex   libspeexdsp, one adaptive filter per microphone, no suppressor
 //    none    no cancellation
+//
+// speex works in blocks of 16 ms (256 samples: a power-of-two transform, measured 16% cheaper
+// than 10 ms blocks at the same cancellation), aec3 and none in blocks of 10 ms.
 //
 // Built with -DRSP_AEC_NO_AEC3 the aec3 engine is left out (the host tests build it so).
 #include <algorithm>
@@ -57,10 +62,12 @@ int speex_echo_ctl(void *st, int request, void *ptr);
 
 namespace {
 
-const int CH = 8, MICS = 6, RATE = 16000, FRAME = 160;
+const int CH = 8, MICS = 6, RATE = 16000;
+const int AEC3_FRAME = 160;    // AEC3 takes 10 ms
+const int SPEEX_FRAME = 256, SPEEX_TAIL = 1536;   // 16 ms blocks, 96 ms of echo
 const int DELAY = 64;          // samples the microphones are held back
 const int QUIET = 12;          // loopback sum >> 13 at or below this is idle noise (measured: up to 3)
-const int HOLD = 30;           // frames (300 ms) the canceller stays on after the speaker stops
+const int HOLD_MS = 300;       // the canceller stays on this long after the speaker stops
 
 // One second-order section of a Butterworth high-pass (RBJ cookbook), transposed direct form II.
 struct Biquad {
@@ -123,7 +130,7 @@ int16_t to_s16(long long x) { return (int16_t)std::max(-32768LL, std::min(32767L
 }  // namespace
 
 int main(int argc, char **argv) {
-    std::string engine = "aec3";
+    std::string engine = "speex";
     bool linear = false;
     double gentle = 16;
     int tail = 0;
@@ -148,6 +155,8 @@ int main(int argc, char **argv) {
         return 2;
     }
     (void)linear; (void)gentle; (void)tail;
+    const int FRAME = engine == "speex" ? SPEEX_FRAME : AEC3_FRAME;
+    const int HOLD = HOLD_MS * RATE / 1000 / FRAME;
 
     // fourth-order Butterworth: two sections with these Q values
     std::vector<std::array<Biquad, 2>> hp(MICS);
@@ -160,6 +169,7 @@ int main(int argc, char **argv) {
 #ifndef RSP_AEC_NO_AEC3
     rtc::scoped_refptr<webrtc::AudioProcessing> apm;
     webrtc::StreamConfig mono(RATE, 1), multi(RATE, MICS);
+    std::vector<std::array<float, AEC3_FRAME>> lin(MICS);
     if (engine == "aec3") {
         webrtc::EchoCanceller3Config ec;
         ec.filter.export_linear_aec_output = linear;
@@ -188,7 +198,7 @@ int main(int argc, char **argv) {
 #endif
     if (engine == "speex") {
         for (int c = 0; c < MICS; c++) {
-            void *st = speex_echo_state_init(FRAME, 1600);
+            void *st = speex_echo_state_init(SPEEX_FRAME, SPEEX_TAIL);
             int rate = RATE;
             speex_echo_ctl(st, 24, &rate);          // SPEEX_ECHO_SET_SAMPLING_RATE
             speex.push_back(st);
@@ -200,7 +210,6 @@ int main(int argc, char **argv) {
     std::vector<int32_t> mic(FRAME);
     std::vector<std::vector<float>> fm(MICS, std::vector<float>(FRAME)), fo(MICS, std::vector<float>(FRAME));
     std::vector<float> fr(FRAME), fro(FRAME);
-    std::vector<std::array<float, FRAME>> lin(MICS);
     const float *src[MICS], *rsrc[1] = {fr.data()};
     float *dst[MICS], *rdst[1] = {fro.data()};
     for (int c = 0; c < MICS; c++) {
@@ -208,7 +217,7 @@ int main(int argc, char **argv) {
         dst[c] = fo[c].data();
     }
     (void)src; (void)dst; (void)rsrc; (void)rdst;          // unused without the aec3 engine
-    int16_t rec[FRAME], play[FRAME], clean[FRAME];
+    std::vector<int16_t> rec(FRAME), play(FRAME), clean(FRAME);
     int hold = 0;
 
     while (read_all(in.data(), in.size() * 4)) {
@@ -235,7 +244,7 @@ int main(int argc, char **argv) {
                 for (int i = 0; i < FRAME; i++) fm[c][i] = (float)(mic[i] / 2147483648.0);
             } else {
                 for (int i = 0; i < FRAME; i++) rec[i] = (int16_t)(mic[i] >> 16);
-                speex_echo_cancellation(speex[c], rec, play, clean);
+                speex_echo_cancellation(speex[c], rec.data(), play.data(), clean.data());
                 // subtract the estimated echo from the full-precision samples
                 for (int i = 0; i < FRAME; i++)
                     out[i * CH + c] = to_s32((double)mic[i] - 65536.0 * (rec[i] - clean[i]));
@@ -247,7 +256,7 @@ int main(int argc, char **argv) {
             apm->set_stream_delay_ms(0);
             apm->ProcessStream(src, multi, multi, dst);
             if (linear) {
-                apm->GetLinearAecOutput(rtc::ArrayView<std::array<float, FRAME>>(lin.data(), MICS));
+                apm->GetLinearAecOutput(rtc::ArrayView<std::array<float, AEC3_FRAME>>(lin.data(), MICS));
                 for (int c = 0; c < MICS; c++)
                     for (int i = 0; i < FRAME; i++) out[i * CH + c] = to_s32(lin[c][i] * 65536.0);
             } else {
