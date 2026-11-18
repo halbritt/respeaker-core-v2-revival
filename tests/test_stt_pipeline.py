@@ -421,3 +421,13 @@ def test_odas_runs_sequentially_unless_told_otherwise(rsp_stt_loader) -> None:
     assert "-s" in cmd
     threaded = rsp_stt_loader(env={"STT_ODAS_ARGS": ""})
     assert threaded.odas_command("/run/x.cfg") == [threaded.ODAS_BIN, "-c", "/run/x.cfg"]
+
+
+def test_odas_level_threshold_follows_what_was_measured(rsp_stt_loader) -> None:
+    """ODAS's noise-masked stream is quiet. At the plain-microphone threshold (150) speech in a
+    humming room lost about one word in five; at 40 one in nine, with no false transcripts on
+    six minutes of fan noise and none of the board's own voice let through."""
+    stt = rsp_stt_loader()
+    assert stt.ODAS_MIN_RMS == 40
+    assert stt.MIN_RMS == 150, "the plain-microphone mode keeps its own threshold"
+    assert rsp_stt_loader(env={"STT_ODAS_MIN_RMS": "90"}).ODAS_MIN_RMS == 90

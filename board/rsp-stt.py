@@ -73,7 +73,7 @@ ODAS_CFG  = env("STT_ODAS_CFG", "/opt/rsp-stt/odas-respeaker-core-v2.cfg")
 ODAS_AUDIO_PORT = env("STT_ODAS_AUDIO_PORT", 9002, int)   # "postfiltered" sink in the cfg
 ODAS_TRACK_PORT = env("STT_ODAS_TRACK_PORT", 9000, int)   # "tracked" sink in the cfg
 ODAS_STREAMS = env("STT_ODAS_STREAMS", 4, int)            # tracked-source slots (ssl.nPots)
-ODAS_MIN_RMS = env("STT_ODAS_MIN_RMS", MIN_RMS, int)
+ODAS_MIN_RMS = env("STT_ODAS_MIN_RMS", 40, int)   # ODAS's noise-masked stream is quiet; measured, see README
 ODAS_SEP_PORT = env("STT_ODAS_SEP_PORT", 9003, int)       # "separated" sink in the cfg
 # Which ODAS stream is sent to the server. The postfiltered stream (noise-masked) always
 # drives the VAD; "separated" is the plain beamformer output, which speech recognisers

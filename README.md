@@ -61,6 +61,11 @@ arecord (8 ch, 16 kHz, S32) --> rsp-aec --FIFO--> odaslive --+-- tracked sources
   offsets: 19% word error rate with the filter, 23% without. With the hum doubled it was the
   other way round (42% against 26%): unfiltered, the hum holds the detector open, so
   everything is sent; filtered, quiet stretches of speech fall below the level detector.
+- The level detector's threshold for the ODAS stream is 40 (`STT_ODAS_MIN_RMS`); the
+  plain-microphone value of 150 was too high for ODAS's noise-masked output. On the same
+  speech-with-hum test the error rate fell from about 19% to about 11%, clean speech stayed
+  the same, and six minutes of fan noise produced no transcript at either setting (29 sounds
+  reached the speech gate instead of 17).
 - A sound that ODAS never tracked is dropped as noise if it is shorter than 2 s
   (`STT_UNTRACKED_MIN_MS`); a longer one goes to the speech gate. In a noisy room ODAS loses
   a talker for seconds at a time, and those seconds used to be discarded unheard. Their
@@ -183,8 +188,8 @@ them (`STT_AEC=0` turns both off):
    of its energy is coherent with what was played (`STT_ECHO_SHARE`, default 0.1), or when it
    overlaps playback and comes from the direction the speaker has been heard from
    (`STT_ECHO_AZ`, default 25 degrees; the direction is learned from the clear cases).
-   Dropped utterances are logged as `drop: own speaker`. With AEC3 this is a safety net, for
-   the first second or two of playback before the filters have adapted.
+   Dropped utterances are logged as `drop: own speaker`. With AEC3 this is a safety net: on
+   a ten-minute take with 85 s of playback it caught three to five leftovers.
 
 Measured on the board (2026-11-18) with a recording of the board reading a poem aloud at a
 loud setting, and a recording of a person reading in the same room, replayed through ODAS and Whisper.
@@ -309,9 +314,9 @@ the command line means `bringup`.
 - The new OS runs from the SD card. The eMMC works under 6.18 (clock limited to 37.5 MHz),
   but installing to it is not scripted.
 - A local wake-word model is not set up.
-- Speech in loud steady noise: the level detector works on ODAS's noise-masked stream and
-  misses quiet stretches of speech when the noise in the speech band comes within about
-  5 dB of the talker (see the hum measurements under "Audio pipeline").
+- Speech in loud steady noise: with noise in the speech band within about 5 dB of the
+  talker, a fifth to a third of the words were still lost (see the hum measurements under "Audio
+  pipeline"). All of this was measured with one talker and one noise source.
 - Talking over the board while it speaks (barge-in) only works when the talker is about as
   loud as the speaker at the microphones; see "Not hearing itself". It was measured by adding
   recordings together, not yet by a person talking over the speaker.
