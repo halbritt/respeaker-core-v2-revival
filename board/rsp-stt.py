@@ -42,6 +42,8 @@ RATE      = 16000
 FRAME_MS  = 30
 LOG_DROP_MS = 2000     # dropped sounds at least this long are always logged
 AEC       = env("STT_AEC", "1") == "1"   # remove the board's own speaker from the microphones
+AEC_BIN   = env("STT_AEC_BIN", "/opt/rsp-stt/rsp-aec")   # native canceller (WebRTC AEC3); built-in one without it
+AEC_ARGS  = env("STT_AEC_ARGS", "")      # options for it, see rsp-aec.cc
 ECHO_SIM  = env("STT_ECHO_SHARE", 0.1, float)   # utterances with this share of played sound in them are the board's own voice
 ECHO_CLEAR = 0.2       # share at which an utterance teaches where the speaker is
 ECHO_AZ   = env("STT_ECHO_AZ", 25, float)   # degrees round the speaker's direction treated as the speaker while it plays
@@ -119,15 +121,47 @@ JUNK = ("[BLANK_AUDIO]", "[ Silence ]", "[silence]", "(silence)", "[MUSIC]", "[M
 def log(msg):
     sys.stdout.write(msg + "\n"); sys.stdout.flush()
 
+class Loopback:
+    """Watches the capture's loopback channels: is the speaker playing, and what.
+
+    The played signal goes to PLAYED, which recognises the board's own voice in an utterance
+    later. The idle loopback is not silent but a few steps of noise."""
+    HOLD = 10                                  # blocks counted as playing after the speaker stops
+    QUIET = 12                                 # the idle loopback is noise of up to 3 of these 16-bit steps
+
+    def __init__(self):
+        self.hold = 0
+        self.active = False                    # the speaker is playing, or stopped a moment ago
+
+    def see(self, a, keep=True):
+        """a: one block, int32 (samples, CHANNELS). Returns the played signal as int16, or
+        None while the speaker is idle."""
+        ref = a[:, MICS:].sum(axis=1, dtype=np.int64) >> 13
+        if np.abs(ref).max() > self.QUIET:
+            self.hold = self.HOLD
+        elif self.hold > 0:
+            self.hold -= 1                     # the room rings on after the speaker stops
+        else:
+            self.active = False
+            PLAYED.add(None)
+            return None
+        self.active = True
+        # the loopback is quiet: 16-bit with 12 dB of gain; the filter adapts to any level
+        play = np.ascontiguousarray(np.clip(ref, -32768, 32767).astype(np.int16))
+        PLAYED.add(play if keep else None)
+        return play
+
 class EchoCanceller:
     """Removes the board's own speaker from the microphone channels of the raw capture.
+
+    The built-in canceller, used when the native one (rsp-aec) is not installed.
 
     The card's channels after the microphones are a loopback of what the speaker plays. One
     adaptive filter per microphone (libspeexdsp) learns how that reaches the microphone and
     subtracts it. Blocks are passed through untouched while the loopback is idle, so
     normal listening costs nothing and cannot be altered by this."""
-    FRAME, TAIL, HOLD = 160, 1600, 10          # 10 ms frames, 100 ms of room, blocks kept active after
-    QUIET = 12                                 # the idle loopback is noise of up to 3 of these 16-bit steps
+    FRAME, TAIL = 160, 1600                    # 10 ms frames, 100 ms of room
+    QUIET = Loopback.QUIET
 
     def __init__(self):
         import ctypes, ctypes.util
@@ -145,27 +179,18 @@ class EchoCanceller:
             rate = ctypes.c_int(RATE)
             lib.speex_echo_ctl(st, 24, ctypes.byref(rate))        # SPEEX_ECHO_SET_SAMPLING_RATE
             self.states.append(st)
-        self.hold = 0
-        self.active = False                     # the speaker is playing, or stopped a moment ago
+        self.loopback = Loopback()
+
+    @property
+    def active(self):
+        return self.loopback.active
 
     def process(self, raw):
         a = np.frombuffer(raw, dtype="<i4").reshape(-1, CHANNELS)
-        ref = a[:, MICS:].sum(axis=1, dtype=np.int64) >> 13
-        if np.abs(ref).max() > self.QUIET:
-            self.hold = self.HOLD
-        elif self.hold > 0:
-            self.hold -= 1                      # the room rings on after the speaker stops
-        else:
-            self.active = False
-            PLAYED.add(None)
+        whole = len(a) % self.FRAME == 0
+        play = self.loopback.see(a, keep=whole)
+        if play is None or not whole:
             return raw
-        self.active = True
-        if len(a) % self.FRAME:
-            PLAYED.add(None)
-            return raw
-        # the loopback is quiet: 16-bit with 12 dB of gain; the filter adapts to any level
-        play = np.ascontiguousarray(np.clip(ref, -32768, 32767).astype(np.int16))
-        PLAYED.add(play)
         out = a.copy()
         cleaned = np.zeros(self.FRAME, np.int16)
         for c, st in enumerate(self.states):
@@ -247,6 +272,19 @@ class PlayedLog:
         return sum(b is not None for b in span) / float(m) if m else 0.0
 
 PLAYED = PlayedLog()
+
+def preload_played(path):
+    """Replay: take what the speaker played from the recording's own loopback channels, so a
+    take is judged as it would have been live."""
+    PLAYED.blocks = collections.deque()                    # the whole take, not the last two minutes
+    PLAYED.n = 0
+    watch, step = Loopback(), PlayedLog.BLOCK * CHANNELS * 4
+    with open(path, "rb") as f:
+        while True:
+            raw = f.read(step)
+            if len(raw) < step:
+                break
+            watch.see(np.frombuffer(raw, dtype="<i4").reshape(-1, CHANNELS))
 SPEAKER_AZ = collections.deque(maxlen=8)   # directions of utterances that clearly were the speaker
 
 def from_speaker(az):
@@ -711,13 +749,29 @@ def capture_to(fifo):
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)      # only now, or the card overruns
     req, active = os.path.join(RUN_DIR, "record.req"), os.path.join(RUN_DIR, "record.active")
     rec, left, n = None, 0, 0
-    aec = None
-    if AEC:
+    aec = helper = loopback = None
+    if AEC and os.access(AEC_BIN, os.X_OK) and np is not None:
+        # the native canceller sits between this process and ODAS; recordings keep the raw capture
+        helper = subprocess.Popen([AEC_BIN] + AEC_ARGS.split(), stdin=subprocess.PIPE, stdout=out)
+        loopback = Loopback()
+        log("rsp-stt: echo cancellation on (%s %s, loopback channels %d-%d)"
+            % (os.path.basename(AEC_BIN), AEC_ARGS or "aec3", MICS + 1, CHANNELS))
+    elif AEC:
         try:
             aec = EchoCanceller()
-            log("rsp-stt: echo cancellation on (loopback channels %d-%d)" % (MICS + 1, CHANNELS))
+            log("rsp-stt: echo cancellation on (built-in, loopback channels %d-%d)" % (MICS + 1, CHANNELS))
         except Exception as e:
             log("warn: echo cancellation unavailable: %s" % e)
+
+    def leave(why):
+        log("error: %s" % why)
+        if helper is not None:
+            try:
+                helper.stdin.close()                          # let it pass on what it still holds
+                helper.wait(timeout=2)
+            except Exception:
+                pass
+        os._exit(1)                                           # let systemd restart everything
     try:
         os.unlink(active)
     except OSError:
@@ -725,9 +779,17 @@ def capture_to(fifo):
     while True:
         raw = read_exact(proc.stdout, block)
         if not raw:
-            log("error: arecord ended (exit %s)" % proc.poll())
-            os._exit(1)                                       # let systemd restart everything
-        if aec is not None:
+            leave("arecord ended (exit %s)" % proc.poll())
+        if helper is not None:
+            try:
+                helper.stdin.write(raw)
+                helper.stdin.flush()
+            except (BrokenPipeError, OSError):
+                leave("rsp-aec ended (exit %s)" % helper.poll())
+            loopback.see(np.frombuffer(raw, dtype="<i4").reshape(-1, CHANNELS))
+            if loopback.active:
+                PLAYBACK[0] = time.time()
+        elif aec is not None:
             out.write(aec.process(raw))                       # recordings below keep the raw capture
             if aec.active:
                 PLAYBACK[0] = time.time()
@@ -762,6 +824,8 @@ def run_odas():
         os.makedirs(RUN_DIR)
     if ODAS_INPUT:
         source = os.path.realpath(ODAS_INPUT)
+        if AEC and np is not None:
+            preload_played(source)
     else:
         source = os.path.join(RUN_DIR, "raw.fifo")
         if os.path.exists(source):

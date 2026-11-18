@@ -24,3 +24,16 @@ git -C newos/cross/src/odas checkout 004cb82
 ```
 
 Do not commit `src/` or `out/` to git.
+
+## Echo canceller
+
+`build-aec.sh` builds `out/rsp-aec/rsp-aec` from `board/rsp-aec.cc` (mounted at `/board` by
+`cross.sh`). It downloads webrtc-audio-processing 1.3 (checked by SHA-256) into `src/`, builds
+it as a static library with NEON, and links it in together with the library's own pinned
+abseil, so the board needs only `libspeexdsp1` at run time.
+
+```sh
+./newos/cross/cross.sh ./build-aec.sh
+```
+
+`mk-sd-image.sh` installs the result as `/opt/rsp-stt/rsp-aec`.

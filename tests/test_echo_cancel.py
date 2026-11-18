@@ -265,3 +265,18 @@ def test_speech_from_the_speakers_direction_is_kept_when_the_speaker_is_silent(r
     _play(stt, np.zeros(20 * RATE))                         # twenty seconds of silence follow
     stt.PLAYED.blocks = type(stt.PLAYED.blocks)([None if not b.any() else b for b in stt.PLAYED.blocks], maxlen=4000)
     assert _hand(stt, monkeypatch, _speechlike(4, seed=52, level=0.3), 25.0, az=240)
+
+
+def test_replaying_a_recording_knows_what_the_speaker_played_in_it(rsp_stt_loader, monkeypatch, tmp_path) -> None:
+    """rsp-replay must judge a take as the live service would: the recording's loopback channels
+    are the played signal, so the board's own voice in it is recognised offline too."""
+    stt = rsp_stt_loader()
+    ref, heard = _scene()
+    quiet = np.zeros(2 * RATE)
+    raw = _raw([np.concatenate([quiet, heard])] * 6, np.concatenate([quiet, ref]))
+    take = tmp_path / "take.raw"
+    take.write_bytes(raw)
+    stt.preload_played(str(take))
+    assert stt.PLAYED.n == len(raw) // (BLOCK * CH * 4)
+    assert stt.PLAYED.blocks[10] is None and stt.PLAYED.blocks[166] is not None   # 0.3 s idle, 5 s playing
+    assert _handle(stt, monkeypatch, heard[RATE : 7 * RATE], end_s=9.0) == [], "the board's own voice was sent to Whisper"

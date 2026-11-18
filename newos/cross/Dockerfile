@@ -5,6 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN dpkg --add-architecture armhf && apt-get update && apt-get install -y --no-install-recommends \
       build-essential crossbuild-essential-armhf cmake ninja-build pkg-config git ca-certificates file \
       libfftw3-dev:armhf libconfig-dev:armhf libasound2-dev:armhf libpulse-dev:armhf \
+      meson curl xz-utils python3 libspeexdsp-dev:armhf \
     && rm -rf /var/lib/apt/lists/*
 # CMake toolchain file: target armhf, find libraries only in the armhf multiarch dirs
 RUN printf '%s\n' \

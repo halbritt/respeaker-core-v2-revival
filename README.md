@@ -25,11 +25,11 @@ Status: works on one board. Not yet rebuilt from scratch end to end; see "Known 
 
 | Path | Contents |
 |---|---|
-| `board/` | Runtime: `rsp-stt.py`, its settings and unit, the ODAS config, `rsp-record`, `rsp-replay`, `rsp-listen`, `rsp-leds` |
+| `board/` | Runtime: `rsp-stt.py`, its settings and unit, the ODAS config, `rsp-aec.cc` (echo canceller), `rsp-record`, `rsp-replay`, `rsp-listen`, `rsp-leds` |
 | `newos/port/` | Board device tree, kernel patches (`0001` AC108 driver port, `0002` output gain control for the SoC codec), reference sources |
 | `newos/mk-sd-image.sh` | Assembles the SD image from an Armbian rootfs plus our kernel, dtb and services |
 | `newos/overlay/`, `newos/debug-initrd/` | Boot safety net and bring-up tools |
-| `newos/cross/` | Docker cross toolchain (Debian 13 armhf) and the ODAS build with patches |
+| `newos/cross/` | Docker cross toolchain (Debian 13 armhf), the ODAS build with patches, and the `rsp-aec` build |
 | `newos/vendor-4.4/` | Vendor kernel config and Seeed's kernel patches, for reference |
 | `tools/bin/rsp-serial` | Run a command on the vendor image's USB serial console |
 | `tests/` | Host test suite: `mise run test`, or `python3 -m pytest tests` (needs pytest and numpy; some tests skip without `dtc`, a static busybox or the upstream sources) |
@@ -40,9 +40,9 @@ Rockchip loader tools, kernel/rootfs output, a static busybox for the initramfs.
 ## Audio pipeline
 
 ```
-arecord (8 ch, 16 kHz, S32) --FIFO--> odaslive --+-- tracked sources (JSON, TCP 9000)
-        |                                        +-- postfiltered audio (TCP 9002)
-        +--> ~/recordings/*.raw (on request)     +-- separated audio    (TCP 9003)
+arecord (8 ch, 16 kHz, S32) --> rsp-aec --FIFO--> odaslive --+-- tracked sources (JSON, TCP 9000)
+        |                   (removes the speaker)            +-- postfiltered audio (TCP 9002)
+        +--> ~/recordings/*.raw (on request)                 +-- separated audio    (TCP 9003)
                                                         |
                               rsp-stt: follow the loudest source, VAD, utterances
                                                         |
@@ -155,21 +155,57 @@ without a gap.
 
 ### Not hearing itself
 
-The sound card's last two channels are a loopback of what the speaker plays. `rsp-stt` uses
-them in two stages (`STT_AEC=0` turns both off):
+The sound card's last two channels are a loopback of what the speaker plays. Two stages use
+them (`STT_AEC=0` turns both off):
 
-1. **Cancellation.** One adaptive filter per microphone (libspeexdsp) subtracts the speaker's
-   sound from the raw capture before ODAS sees it: about 15 dB once adapted. Blocks pass
-   through untouched while the speaker is silent, so normal listening is unchanged and costs
-   nothing.
-2. **Recognising the leftover.** What remains can still be loud enough to transcribe. An
-   utterance is dropped as the board's own voice when enough of its energy is coherent with
-   what was played (`STT_ECHO_SHARE`, default 0.1), or when it overlaps playback and comes
-   from the direction the speaker has been heard from (`STT_ECHO_AZ`, default 25 degrees;
-   the direction is learned from the clear cases). Dropped utterances are logged as
-   `drop: own speaker`.
+1. **Cancellation.** `rsp-aec` sits between the capture and ODAS and removes the speaker from
+   the six microphone channels with WebRTC's AEC3: an adaptive filter per microphone and one
+   suppression gain common to all six, so the differences between the microphones that the
+   direction finder needs survive. While the loopback is idle it computes nothing and passes
+   the microphones on unchanged (delayed by 4 ms, see below). Without `/opt/rsp-stt/rsp-aec`
+   the service falls back to a built-in canceller (libspeexdsp through ctypes, filters only).
+2. **Recognising the leftover.** An utterance is dropped as the board's own voice when enough
+   of its energy is coherent with what was played (`STT_ECHO_SHARE`, default 0.1), or when it
+   overlaps playback and comes from the direction the speaker has been heard from
+   (`STT_ECHO_AZ`, default 25 degrees; the direction is learned from the clear cases).
+   Dropped utterances are logged as `drop: own speaker`. With AEC3 this is a safety net, for
+   the first second or two of playback before the filters have adapted.
 
-Someone talking from elsewhere in the room while the board speaks is kept.
+Measured on the board (2026-11-18) with a recording of the board reading a poem aloud at a
+loud setting, and a recording of a person reading in the same room, replayed through ODAS and Whisper.
+The two were also added together at different levels to test talking over the speaker:
+
+| | built-in (speex) | `rsp-aec` (AEC3) |
+|---|---|---|
+| Speaker's level in the microphones | -10 dB | -16 dB (-30 dB with `--gentle 1`) |
+| Speaker alone: its words reaching Whisper, of 96 | 94, all then caught by stage 2 | 0 |
+| Person as loud as the speaker: word error rate | 23% | 38% |
+| Person 7 dB quieter than the speaker | 81% | 56% |
+| Person 17 dB quieter (the recording as made) | not usable | not usable |
+| CPU while the speaker plays | about 70% of a core (in Python) | about 55% |
+| CPU while it is silent | none | under 1% |
+
+Things that matter when changing any of this:
+
+- **The speaker limits what any canceller can do.** A least-squares filter fitted offline to
+  that recording removes only 12 dB: the rest of what the microphones hear is not a filtered
+  copy of the loopback but distortion of the small open speaker at that volume. The linear
+  filters (speex, or AEC3 with `--linear`) are at that limit. A cleaner speaker, a lower
+  volume or more distance between speaker and microphones will do more than tuning.
+- **AEC3 needs the echo to arrive clearly after the loopback.** Here it arrives 1.6 ms after,
+  and AEC3's filters then remove 2 dB instead of 10. `rsp-aec` therefore holds the
+  microphones back by 4 ms.
+- **AEC3's stock suppressor is tuned for a talker louder than the echo** and removes a quiet
+  talker with it. `--gentle N` lets N times more echo through before it suppresses; 16 is the
+  default (at 64 the speaker's own words started to come through).
+- **Debian's `libwebrtc-audio-processing` is built without NEON** and does not install the
+  AEC3 headers, and its linear-output mode crashes. `newos/cross/build-aec.sh` builds the
+  library (1.3) from source with NEON and links it in; that took one six-channel instance
+  from 59% to 41% of a core. Six single-channel instances cost 159%.
+- libspeexdsp's NEON option covers its resampler only, not the echo canceller.
+
+`rsp-replay` judges a recording the same way: it reads what the speaker played from the
+recording's own loopback channels.
 
 ## ODAS
 
@@ -250,14 +286,14 @@ the command line means `bringup`.
 
 ## Known gaps
 
-- The image built by `mk-sd-image.sh` has not yet been flashed and booted from scratch; the
-  running board was brought up step by step.
+- The image built by `mk-sd-image.sh` was flashed and cold-booted once (2026-11-17); images
+  built after later changes were not booted again.
 - The new OS runs from the SD card. The eMMC works under 6.18 (clock limited to 37.5 MHz),
   but installing to it is not scripted.
 - A local wake-word model is not set up.
-- Echo handling is new and tested with two synthetic voices only; talking over the board
-  while it speaks (barge-in) has not been tried by a person.
-  The loopback channels are captured but unused.
+- Talking over the board while it speaks (barge-in) only works when the talker is about as
+  loud as the speaker at the microphones; see "Not hearing itself". It was measured by adding
+  recordings together, not yet by a person talking over the speaker.
 - The kernel's USB PHY use-after-free (see above) is worked around in the device tree; a fix
   for the driver is in `newos/port/patches/` and has not been sent upstream.
 - Mic gain is 24 dB: at 28 dB a talker close to the board peaked at -0.8 dBFS. Not calibrated further.
@@ -274,3 +310,6 @@ MIT (`LICENSE`) for everything except the kernel-derived files:
 
 Files that carry their own licence notice or SPDX tag are under that licence. The ODAS patches
 in `newos/cross/patches/` are MIT, as ODAS is.
+The `rsp-aec` program built by `newos/cross/build-aec.sh` links webrtc-audio-processing
+(BSD-3-Clause), abseil (Apache-2.0) and libspeexdsp (BSD-3-Clause); none of them is in this
+repository.
