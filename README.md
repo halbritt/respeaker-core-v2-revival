@@ -357,6 +357,8 @@ the command line means `bringup`.
 
 ## Known gaps
 
+- A successor to this audio pipeline, with the microphone array as configuration and without
+  ODAS, is planned as a separate project: [earshot](https://github.com/halbritt/earshot).
 - The image built by `mk-sd-image.sh` was flashed and cold-booted once (2026-11-17); images
   built after later changes were not booted again.
 - The new OS runs from the SD card. The eMMC works under 6.18 (clock limited to 37.5 MHz),
