@@ -73,6 +73,7 @@ def _run(tmp_path: Path, env: dict[str, str], record: bool = False) -> tuple[byt
         "    played = sum(1 for b in m.PLAYED.blocks if b is not None)\n"
         "    print('PLAYED_BLOCKS=%d PLAYBACK_SEEN=%d' % (played, m.PLAYBACK[0] > 0), file=sys.stderr, flush=True)\n"
         "    t.join(5)\n"
+        "    print('MIC_BYTES=%d' % len(m.MIC.buf), file=sys.stderr, flush=True)\n"
         "    real_exit(code)\n"
         "m.os._exit = leave\n"
         f"m.capture_to({str(fifo)!r})\n"
@@ -100,6 +101,17 @@ def test_capture_goes_to_odas_through_the_native_canceller(tmp_path: Path) -> No
     assert len(got) == len(want), "every captured block must come out again"
     assert np.array_equal(got, want)
     assert "rsp-aec" in log, "the log must say which canceller runs"
+
+
+def test_in_mic_mode_odas_is_fed_the_same_sound_and_the_microphone_is_kept_aside(tmp_path: Path) -> None:
+    """Mic mode taps the canceller's output on its way to ODAS; ODAS must not notice."""
+    fed, log, _ = _run(tmp_path, {"STT_AEC_BIN": str(_fake(tmp_path)), "STT_SOURCE": "odas", "STT_ODAS_MODE": "mic"})
+    want = np.frombuffer(_capture(), dtype="<i4").reshape(-1, CH).copy()
+    want[:, :6] = -want[:, :6]
+    got = np.frombuffer(fed, dtype="<i4").reshape(-1, CH)
+    assert len(got) == len(want) and np.array_equal(got, want)
+    kept = int(log.split("MIC_BYTES=")[1].split()[0])
+    assert kept == len(want) * 2, "microphone 0 of every block, as 16-bit mono"
 
 
 def test_recordings_keep_the_capture_as_the_microphones_heard_it(tmp_path: Path) -> None:

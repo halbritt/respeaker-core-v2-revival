@@ -451,3 +451,60 @@ def test_whisper_is_not_asked_twice_when_the_speaker_is_silent(rsp_stt_loader, m
     stt.PLAYED.blocks = type(stt.PLAYED.blocks)([None] * len(stt.PLAYED.blocks), maxlen=4000)
     out = _hand_text(stt, monkeypatch, _speechlike(6, seed=10, level=0.3), 74, [PERSON])
     assert [o["text"] for o in out] == [PERSON] and "over_speaker" not in out[0]
+
+
+# --- mic mode: a person ODAS has no track for ---
+
+
+def _hand_untracked(stt, monkeypatch, audio, texts: list[str]) -> list[dict]:
+    answers, out = list(texts), []
+    monkeypatch.setattr(stt, "transcribe", lambda pcm: answers.pop(0))
+    monkeypatch.setattr(stt, "has_speech", lambda pcm: True)
+    monkeypatch.setattr(stt, "emit", lambda text, dur, took, meta: out.append(dict(meta, text=text)))
+    stt.handle(_pcm16(audio), {"t": 7.0})
+    return out
+
+
+def _mic_mode_env(tmp_path) -> dict[str, str]:
+    exe = tmp_path / "rsp-aec"
+    exe.write_text("#!/bin/sh\nexec cat\n", encoding="utf-8")
+    exe.chmod(0o755)
+    return {"STT_SPEAKER_AZ": "185", "STT_SOURCE": "odas", "STT_ODAS_MODE": "mic", "STT_AEC_BIN": str(exe)}
+
+
+def test_in_mic_mode_an_untracked_person_over_the_board_is_judged_by_their_words(
+    rsp_stt_loader, monkeypatch, tmp_path
+) -> None:
+    """ODAS loses a talker for seconds at a time. In mic mode their sound still arrives, and
+    while the board plays it must not be thrown away for having no direction."""
+    stt = rsp_stt_loader(env=_mic_mode_env(tmp_path))
+    ref, heard = _scene()
+    _play(stt, ref)
+    mixed = "The night train to the mountains leaves from hot brown wine. " + PERSON
+    out = _hand_untracked(stt, monkeypatch, _over_the_speaker(heard, 60, 0.4), [mixed, BOARD])
+    assert [o["text"] for o in out] == ["hot brown wine. " + PERSON]
+    assert out[0]["over_speaker"] is True and "az" not in out[0]
+
+
+def test_in_mic_mode_the_board_alone_without_a_track_is_still_dropped(rsp_stt_loader, monkeypatch, tmp_path, capsys) -> None:
+    stt = rsp_stt_loader(env=_mic_mode_env(tmp_path))
+    ref, heard = _scene()
+    _play(stt, ref)
+    assert _hand_untracked(stt, monkeypatch, _over_the_speaker(heard, 60, 0.4), [BOARD, BOARD]) == []
+    assert "drop: own speaker" in capsys.readouterr().out
+
+
+def test_in_dominant_mode_an_untracked_sound_full_of_played_sound_is_dropped_unheard(
+    rsp_stt_loader, monkeypatch
+) -> None:
+    """The rule mic mode changes: without it, no direction means no second look."""
+    stt = rsp_stt_loader(env={"STT_SPEAKER_AZ": "185"})
+    ref, heard = _scene()
+    _play(stt, ref)
+    asked: list[int] = []
+    monkeypatch.setattr(stt, "transcribe", lambda pcm: asked.append(1) or PERSON)
+    monkeypatch.setattr(stt, "has_speech", lambda pcm: True)
+    out: list[dict] = []
+    monkeypatch.setattr(stt, "emit", lambda text, dur, took, meta: out.append(meta))
+    stt.handle(_pcm16(_over_the_speaker(heard, 60, 0.4)), {"t": 7.0})
+    assert out == [] and asked == []

@@ -431,3 +431,164 @@ def test_odas_level_threshold_follows_what_was_measured(rsp_stt_loader) -> None:
     assert stt.ODAS_MIN_RMS == 40
     assert stt.MIN_RMS == 150, "the plain-microphone mode keeps its own threshold"
     assert rsp_stt_loader(env={"STT_ODAS_MIN_RMS": "90"}).ODAS_MIN_RMS == 90
+
+
+# --- one-microphone mode (STT_ODAS_MODE=mic) ---
+
+MIC_MARK = 3000                # amplitude of the talker in microphone 0 of the recording
+
+# This fake odaslive hears nothing: it reads its input to the end, as ODAS does, and sends
+# silence on both streams for as long as the recording lasts. FAKE_ODAS_TRACK=1 makes it
+# report one tracked source, straight ahead.
+DEAF_ODASLIVE = r"""
+import json, os, re, socket, sys, threading, time
+import numpy as np
+cfg = open(sys.argv[sys.argv.index('-c') + 1]).read()
+tp, sp, ap = [int(p) for p in re.findall(r'port = (\d+);', cfg)][:3]
+path = re.search(r'type = "file"; path = "([^"]+)"', cfg).group(1)
+st = socket.create_connection(('127.0.0.1', tp), timeout=5)
+ss = socket.create_connection(('127.0.0.1', sp), timeout=5)
+sa = socket.create_connection(('127.0.0.1', ap), timeout=5)
+if os.environ.get('FAKE_ODAS_TRACK') == '1':
+    st.sendall((json.dumps({'src': [{'id': 1, 'x': 1.0, 'y': 0.0, 'z': 0.0, 'activity': 0.9}]}) + '\n').encode())
+    time.sleep(0.3)
+silent = np.zeros((480, 4), dtype='<i2').tobytes()
+step = 480 * 8 * 4
+with open(path, 'rb') as f:
+    while len(f.read(step)) == step:
+        ss.sendall(silent); sa.sendall(silent)
+sa.close(); ss.close(); st.close()
+"""
+
+# stand-in canceller: passes everything through unchanged
+PASS_AEC = "#!/bin/sh\nexec cat\n"
+
+
+def _mic_recording(frames_quiet: int, frames_talk: int, frames_tail: int, play: tuple[int, int] | None = None) -> bytes:
+    """8 channels S32. Microphone 0 carries the talker; microphone 1 something else, louder.
+    `play` = (first frame, frames): the board's speaker plays then (loopback channels 6, 7)."""
+    n = (frames_quiet + frames_talk + frames_tail) * 480
+    a = np.zeros((n, 8), dtype="<i4")
+    talk = slice(frames_quiet * 480, (frames_quiet + frames_talk) * 480)
+    square = np.where(np.arange(frames_talk * 480) % 2 == 0, 1, -1)
+    a[talk, 0] = square * (MIC_MARK << 16)
+    a[talk, 1] = square * (9000 << 16)
+    if play:
+        # noise for both, as unlike each other as a voice and the board's speech are: steady
+        # tones would all look alike to the check for the board's own sound
+        rng = np.random.default_rng(7)
+        a[talk, 0] = rng.integers(MIC_MARK // 2, MIC_MARK, frames_talk * 480) * square << 16
+        span = slice(play[0] * 480, (play[0] + play[1]) * 480)
+        a[span, 6] = a[span, 7] = rng.integers(-(2**27), 2**27, play[1] * 480).astype("<i4")
+    return a.tobytes()
+
+
+def _run_mode(tmp_path: Path, whisper_mock_factory, mode: str, canceller: bool = True, track: bool = False, extra=None,
+              recording_bytes: bytes | None = None):
+    base_url, captured = whisper_mock_factory("someone is talking")
+    fake = tmp_path / "deaf_odaslive.py"
+    fake.write_text(DEAF_ODASLIVE, encoding="utf-8")
+    fake_bin = tmp_path / "deaf-odaslive"
+    fake_bin.write_text(f"#!/bin/sh\nexec {sys.executable!r} {str(fake)!r} \"$@\"\n", encoding="utf-8")
+    fake_bin.chmod(0o755)
+    aec = tmp_path / "rsp-aec"
+    if canceller:
+        aec.write_text(PASS_AEC, encoding="utf-8")
+        aec.chmod(0o755)
+    recording = tmp_path / "take.raw"
+    recording.write_bytes(recording_bytes or _mic_recording(20, 40, 30))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    log_file = tmp_path / "transcripts.jsonl"
+    track_port, audio_port, sep_port = free_ports(3)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    env.update(
+        {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "FAKE_ODAS_TRACK": "1" if track else "0",
+            "STT_SOURCE": "odas",
+            "STT_ODAS_MODE": mode,
+            "STT_AEC_BIN": str(aec),
+            "STT_ODAS_INPUT": str(recording),
+            "STT_ODAS_BIN": str(fake_bin),
+            "STT_ODAS_CFG": str(BOARD_DIR / "odas-respeaker-core-v2.cfg"),
+            "STT_ODAS_TRACK_PORT": str(track_port),
+            "STT_ODAS_AUDIO_PORT": str(audio_port),
+            "STT_ODAS_SEP_PORT": str(sep_port),
+            "STT_SERVER": f"{base_url}/inference",
+            "STT_RUN_DIR": str(run_dir),
+            "STT_REC_DIR": str(tmp_path / "rec"),
+            "STT_LOG": str(log_file),
+            "STT_HTTP": "",
+            "STT_SPEECH_MIN_MS": "0",
+            "STT_PREROLL_MS": "300",
+            "STT_END_SILENCE_MS": "150",
+            "STT_MIN_UTTERANCE_MS": "150",
+            "STT_MIN_DYN_DB": "0",
+            **(extra or {}),
+        }
+    )
+    res = run_bounded([sys.executable, "-u", str(BOARD_DIR / "rsp-stt.py")], env=env, timeout=60)
+    assert res.returncode == 0, f"rsp-stt.py failed:\n{res.stdout}\n{res.stderr}"
+    marks = []
+    for c in captured:
+        fields = _multipart_fields(c["content_type"], c["body"])
+        with wave.open(io.BytesIO(fields["file"]), "rb") as w:
+            samples = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+        marks.append([int(np.abs(f).max()) for f in samples[: len(samples) // 480 * 480].reshape(-1, 480)])
+    return marks, _logged(log_file), res.stdout + res.stderr
+
+
+def test_mic_mode_sends_the_microphone_when_odas_hears_and_tracks_nothing(tmp_path: Path, whisper_mock_factory) -> None:
+    marks, rows, _ = _run_mode(tmp_path, whisper_mock_factory, "mic")
+    assert len(marks) == 1, "the talker in the microphone must become one utterance"
+    voiced = [m for m in marks[0] if m]
+    assert set(voiced) == {MIC_MARK}, "what is sent is microphone 0, nothing else"
+    assert len(voiced) == 40, "all 40 frames of the talker, from the first one"
+    assert len(rows) == 1 and rows[0]["text"] == "someone is talking" and "az" not in rows[0]
+
+
+def test_dominant_mode_loses_the_same_talker(tmp_path: Path, whisper_mock_factory) -> None:
+    """The reason for mic mode: with ODAS silent, the dominant mode has nothing to go on."""
+    marks, rows, _ = _run_mode(tmp_path, whisper_mock_factory, "dominant")
+    assert marks == [] and rows == []
+
+
+def test_mic_mode_reports_the_direction_when_odas_has_one(tmp_path: Path, whisper_mock_factory) -> None:
+    marks, rows, _ = _run_mode(tmp_path, whisper_mock_factory, "mic", track=True)
+    assert len(rows) == 1 and rows[0]["az"] == 0 and rows[0]["src"] == 1
+
+
+def test_mic_mode_can_use_another_microphone(tmp_path: Path, whisper_mock_factory) -> None:
+    marks, _, _ = _run_mode(tmp_path, whisper_mock_factory, "mic", extra={"STT_MIC_CHANNEL": "1"})
+    assert len(marks) == 1 and set(m for m in marks[0] if m) == {9000}
+
+
+def test_mic_mode_without_the_native_canceller_says_so_and_uses_dominant_mode(tmp_path: Path, whisper_mock_factory) -> None:
+    marks, rows, log = _run_mode(tmp_path, whisper_mock_factory, "mic", canceller=False)
+    assert "mic mode needs the native canceller" in log
+    assert marks == [] and rows == []
+
+
+def test_a_talker_still_speaking_when_a_replay_ends_is_not_lost(tmp_path: Path, whisper_mock_factory) -> None:
+    """A recording can stop in the middle of a sentence; the take must still be scored on it."""
+    marks, rows, _ = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=_mic_recording(20, 40, 0))
+    assert len(marks) == 1 and len([m for m in marks[0] if m]) == 40
+    assert len(rows) == 1
+
+
+def test_mic_mode_cuts_an_utterance_where_the_boards_speaker_starts(tmp_path: Path, whisper_mock_factory) -> None:
+    """One stream carries the person and the board. What was said before the board started
+    must not be judged together with what came after."""
+    # the talker speaks during frames 20-99; the board plays from frame 60 to the end
+    take = _mic_recording(20, 80, 30, play=(60, 70))
+    marks, rows, log = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=take)
+    voiced = [len([m for m in u if m]) for u in marks]
+    assert len(voiced) == 2, log
+    assert sum(voiced) == 80, "no frame of the talker is lost at the cut"
+    assert abs(voiced[0] - 40) <= 1, f"the first piece ends where the speaker starts: {voiced}"
+
+
+def test_mic_mode_without_playback_keeps_one_utterance(tmp_path: Path, whisper_mock_factory) -> None:
+    marks, _, _ = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=_mic_recording(20, 80, 30))
+    assert len(marks) == 1 and len([m for m in marks[0] if m]) == 80

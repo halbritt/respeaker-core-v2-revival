@@ -92,7 +92,12 @@ MIN_DYN_DB = env("STT_MIN_DYN_DB", 0, float)
 #             moving about (tracks hand over, reflections get tracked) stays one utterance.
 #   separate  each tracked source is segmented on its own; simultaneous talkers come out as
 #             separate transcripts, but one talker can show up twice or be split.
+#   mic       speech is detected on, and sent from, one microphone after the echo canceller.
+#             ODAS only supplies the direction. Nothing is lost when ODAS loses the talker
+#             or its filtered stream goes quiet (a quarter of a reading was, see README).
+#             Needs the native canceller; without it the mode falls back to dominant.
 ODAS_MODE = env("STT_ODAS_MODE", "dominant")
+MIC_CHANNEL = env("STT_MIC_CHANNEL", 0, int)     # the microphone used in mic mode
 # Where ODAS gets its audio. Empty: this program captures the sound card with arecord and
 # feeds ODAS through a FIFO, so it can also save the raw capture on request (rsp-record)
 # and a capture overrun does not end the pipeline. A path: replay that recording
@@ -559,7 +564,10 @@ def handle(frames, meta):
         # A tracked sound from somewhere else is a person, with the speaker's leftover under
         # them, until most of it is what was played. This needs to know where the speaker is.
         known = SPEAKER_AZ_SET != "" or bool(SPEAKER_AZ)
-        over = az is not None and known and not near and sim >= ECHO_SIM   # its words decide, below
+        # In mic mode a sound needs no track to be heard, so a person ODAS lost is judged the
+        # same way: by the words.
+        placed = az is not None or mic_mode()
+        over = placed and known and not near and sim >= ECHO_SIM   # its words decide, below
         if (sim >= ECHO_SIM and not over) or there:
             log("drop: own speaker in %.1fs utterance%s (%.0f%% of it is what was played%s)" % (
                 dur, " az=%d" % az if az is not None else "", sim * 100,
@@ -594,8 +602,9 @@ def handle(frames, meta):
             text, gone = without_played(text, clean(transcribe(played)) if played else "")
             left = len(text.split())
             if left < (ECHO_WORDS if meta.get("echo", 0) >= ECHO_FAR else 1):
-                log("drop: own speaker in %.1fs utterance az=%d (%.0f%% of it is what was played, "
-                    "%d of its words are the board's, %d are not)" % (dur, meta["az"], meta.get("echo", 0) * 100, gone, left))
+                log("drop: own speaker in %.1fs utterance%s (%.0f%% of it is what was played, "
+                    "%d of its words are the board's, %d are not)" % (
+                        dur, " az=%d" % meta["az"] if "az" in meta else "", meta.get("echo", 0) * 100, gone, left))
                 return
             meta = dict(meta, own_words=gone)
         if SAVE_DIR:
@@ -659,8 +668,13 @@ def rms16(mono):
 
 class Segmenter:
     """Adaptive energy VAD for one mono stream; submits finished utterances."""
-    def __init__(self, min_rms=MIN_RMS, meta=None, name=""):
+    def __init__(self, min_rms=MIN_RMS, meta=None, name="", need_track=True):
         self.min_rms, self.meta, self.name = min_rms, meta, name
+        self.need_track = need_track                  # is a sound ODAS never tracked noise?
+        # Without a beam the board's own voice and a person run together in one stream. Cut
+        # where the speaker starts and where it has stopped, so each piece is judged alone.
+        self.cut_on_playback = not need_track
+        self.was_playing = False
         self.pre = collections.deque(maxlen=max(1, PRE_MS // FRAME_MS))
         self.recent = collections.deque(maxlen=8)     # recent speech/non-speech flags
         self.floor = float(min_rms) / START_RATIO     # adaptive noise floor (rms)
@@ -679,6 +693,8 @@ class Segmenter:
         if DEBUG and self.n % 100 == 0:
             log("debug: %s rms=%d floor=%.0f speaking=%s" % (self.name, rms, self.floor, self.speaking))
         if not self.speaking:
+            if self.cut_on_playback and AEC:
+                self.was_playing = PLAYED.playing(self.n)
             # track the noise floor only while idle: fast down, slow up
             f = self.floor
             self.floor = min(rms, f) * 0.5 + f * 0.5 if rms < f else f * 0.995 + rms * 0.005
@@ -708,37 +724,49 @@ class Segmenter:
         too_long = len(self.utt) * FRAME_MS >= MAX_S * 1000
         long_enough = len(self.utt) * FRAME_MS >= SOFT_S * 1000
         soft_end = long_enough and self.silence_ms >= SOFT_SIL_MS
-        if self.silence_ms >= END_SIL_MS or too_long or soft_end:
-            self.speaking = False
-            self.pre.clear()
-            voiced_ms = len(self.utt) * FRAME_MS - self.silence_ms - PRE_MS
-            meta = self.summary()
-            meta["t"] = round(self.n * FRAME_MS / 1000.0, 1)
-            why = ""
-            if self.meta and "az" not in meta:
-                if 0 < UNTRACKED_MS <= len(self.utt) * FRAME_MS:
-                    meta["untracked"] = True  # long enough to be a talker ODAS lost: ask the speech gate
-                else:
-                    why = "untracked"         # ODAS never tracked a source here: noise
-            elif "az" in meta and ignored(meta["az"]):
-                why = "ignored direction az=%d" % meta["az"]
-            lv = sorted(self.levels[:max(1, len(self.levels) - self.silence_ms // FRAME_MS)])
-            dyn = 20 * math.log10((lv[int(len(lv) * 0.95)] + 1.0) / (lv[int(len(lv) * 0.25)] + 1.0))
-            meta["dyn_db"] = round(dyn, 1)
-            if not why and dyn < MIN_DYN_DB:
-                why = "flat level (%.1f dB)" % dyn
-            if why:
-                # short untracked sounds are everyday noise; anything longer must leave a trace
-                if DEBUG or why != "untracked" or len(self.utt) * FRAME_MS >= LOG_DROP_MS:
-                    log("drop: %s %.1fs %s dyn=%.1f" % (self.name, len(self.utt) * FRAME_MS / 1000.0, why, dyn))
-                voiced_ms = 0
-            publish("speech_end", dict(meta, ts=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                                       sent=voiced_ms >= MIN_MS))
-            if voiced_ms >= MIN_MS:
-                submit(self.utt, meta)
-            elif DEBUG:
-                log("debug: %s dropped %dms blip" % (self.name, voiced_ms))
-            self.utt = []
+        turn = False
+        if self.cut_on_playback and AEC:
+            playing = PLAYED.playing(self.n)
+            turn, self.was_playing = playing != self.was_playing, playing
+        if self.silence_ms >= END_SIL_MS or too_long or soft_end or turn:
+            self.finish()
+
+    def flush(self):
+        """The stream has ended: what is being said now is an utterance too."""
+        if self.speaking:
+            self.finish()
+
+    def finish(self):
+        self.speaking = False
+        self.pre.clear()
+        voiced_ms = len(self.utt) * FRAME_MS - self.silence_ms - PRE_MS
+        meta = self.summary()
+        meta["t"] = round(self.n * FRAME_MS / 1000.0, 1)
+        why = ""
+        if self.meta and self.need_track and "az" not in meta:
+            if 0 < UNTRACKED_MS <= len(self.utt) * FRAME_MS:
+                meta["untracked"] = True  # long enough to be a talker ODAS lost: ask the speech gate
+            else:
+                why = "untracked"         # ODAS never tracked a source here: noise
+        elif "az" in meta and ignored(meta["az"]):
+            why = "ignored direction az=%d" % meta["az"]
+        lv = sorted(self.levels[:max(1, len(self.levels) - self.silence_ms // FRAME_MS)])
+        dyn = 20 * math.log10((lv[int(len(lv) * 0.95)] + 1.0) / (lv[int(len(lv) * 0.25)] + 1.0))
+        meta["dyn_db"] = round(dyn, 1)
+        if not why and dyn < MIN_DYN_DB:
+            why = "flat level (%.1f dB)" % dyn
+        if why:
+            # short untracked sounds are everyday noise; anything longer must leave a trace
+            if DEBUG or why != "untracked" or len(self.utt) * FRAME_MS >= LOG_DROP_MS:
+                log("drop: %s %.1fs %s dyn=%.1f" % (self.name, len(self.utt) * FRAME_MS / 1000.0, why, dyn))
+            voiced_ms = 0
+        publish("speech_end", dict(meta, ts=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                                   sent=voiced_ms >= MIN_MS))
+        if voiced_ms >= MIN_MS:
+            submit(self.utt, meta)
+        elif DEBUG:
+            log("debug: %s dropped %dms blip" % (self.name, voiced_ms))
+        self.utt = []
 
     def summary(self):
         """Direction of the utterance: circular mean of the azimuths seen while speaking."""
@@ -834,7 +862,11 @@ def capture_to(fifo):
     aec = helper = loopback = None
     if native_aec():
         # the native canceller sits between this process and ODAS; recordings keep the raw capture
-        helper = subprocess.Popen(native_aec(), stdin=subprocess.PIPE, stdout=out)
+        if mic_mode():
+            helper = subprocess.Popen(native_aec(), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            threading.Thread(target=tee_to_odas, args=(helper.stdout, out), daemon=True).start()
+        else:
+            helper = subprocess.Popen(native_aec(), stdin=subprocess.PIPE, stdout=out)
         loopback = Loopback()
         log("rsp-stt: echo cancellation on (%s %s, loopback channels %d-%d)"
             % (os.path.basename(AEC_BIN), AEC_ARGS or "speex", MICS + 1, CHANNELS))
@@ -900,6 +932,61 @@ def capture_to(fifo):
                 os.unlink(active)
                 log("record: done")
 
+class MicTap:
+    """The chosen microphone after the canceller, as 16-bit mono, waiting to be taken at the
+    pace of ODAS's output. ODAS answers late, so there is always sound here when it does."""
+    LIMIT = RATE * 2 * 4                       # four seconds: ODAS has stalled if more piles up
+
+    def __init__(self):
+        self.buf, self.cond, self.closed, self.lost = bytearray(), threading.Condition(), False, 0
+
+    def put(self, raw):
+        """raw: S32 frames of all CHANNELS, as they go to ODAS."""
+        mono = (np.frombuffer(raw, dtype="<i4").reshape(-1, CHANNELS)[:, MIC_CHANNEL] >> 16).astype("<i2").tobytes()
+        with self.cond:
+            self.buf += mono
+            if len(self.buf) > self.LIMIT and not OFFLINE:
+                extra = len(self.buf) - self.LIMIT // 2
+                del self.buf[:extra - extra % 2]
+                self.lost += 1
+            self.cond.notify()
+
+    def close(self):
+        with self.cond:
+            self.closed = True
+            self.cond.notify()
+
+    def take(self, nbytes, timeout=5.0):
+        """nbytes of sound, or b"" when the stream has ended or nothing came in time."""
+        with self.cond:
+            if not self.cond.wait_for(lambda: len(self.buf) >= nbytes or self.closed, timeout):
+                return b""
+            if len(self.buf) < nbytes:
+                return b""
+            out = bytes(self.buf[:nbytes])
+            del self.buf[:nbytes]
+            return out
+
+MIC = MicTap()
+
+def mic_mode():
+    return SOURCE == "odas" and ODAS_MODE == "mic" and native_aec() is not None
+
+def tee_to_odas(src, out):
+    """Pass the canceller's output on to ODAS and keep the chosen microphone from it."""
+    block = RATE * 30 // 1000 * CHANNELS * 4
+    try:
+        while True:
+            raw = read_exact(src, block)
+            if not raw:
+                break
+            out.write(raw)
+            MIC.put(raw)
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        MIC.close()
+
 def native_aec():
     """The native canceller's command line, or None when it is off or not installed."""
     if AEC and os.access(AEC_BIN, os.X_OK) and np is not None:
@@ -910,7 +997,12 @@ def replay_to(fifo, path):
     """Replay: feed a recording to ODAS through the native canceller, as the capture would be."""
     out = open(fifo, "wb", buffering=0)                       # blocks until odaslive opens it
     with open(path, "rb") as take:
-        subprocess.call(native_aec(), stdin=take, stdout=out)
+        if mic_mode():
+            helper = subprocess.Popen(native_aec(), stdin=take, stdout=subprocess.PIPE)
+            tee_to_odas(helper.stdout, out)
+            helper.wait()
+        else:
+            subprocess.call(native_aec(), stdin=take, stdout=out)
     out.close()
 
 def odas_command(cfg):
@@ -956,11 +1048,26 @@ def run_odas():
             for i in range(ODAS_STREAMS)]
     cur, lead = [0], [0]                       # dominant mode: current slot, frames a rival has led
     one = Segmenter(ODAS_MIN_RMS, (lambda: TRACKS[cur[0]]), "odas")
+    by_mic = mic_mode()
+    if ODAS_MODE == "mic" and not by_mic:
+        log("warn: mic mode needs the native canceller (%s); using dominant mode" % AEC_BIN)
+    if by_mic:
+        def heard_from():
+            """The talker's direction, if ODAS has one: the loudest slot's track, else any
+            track that is not the board's own speaker."""
+            t = TRACKS[cur[0]]
+            if t is None:
+                t = next((x for x in TRACKS[:ODAS_STREAMS] if x is not None and not from_speaker(x["az"])), None)
+            return t
+        one = Segmenter(MIN_RMS, heard_from, "mic", need_track=False)
+        log("rsp-stt: speech is detected on and sent from microphone %d; ODAS gives the direction" % MIC_CHANNEL)
     nbytes = FRAME_SAMPLES * ODAS_STREAMS * 2
     while True:
         raw = read_exact(audio, nbytes)
         if not raw:
             if OFFLINE:
+                for seg in [one] + segs:
+                    seg.flush()
                 PENDING.join()
                 return 0
             log("error: odaslive audio stream ended (exit %s)" % proc.poll())
@@ -973,7 +1080,7 @@ def run_odas():
             return 1
         a = np.frombuffer(raw, dtype="<i2").reshape(-1, ODAS_STREAMS)
         b = np.frombuffer(raw_sep, dtype="<i2").reshape(-1, ODAS_STREAMS)
-        if ODAS_MODE == "dominant":
+        if ODAS_MODE == "dominant" or by_mic:
             # The postfiltered streams share the energy out between slots, so the loudest
             # one is where the talker currently is. Follow it, with hysteresis so the
             # payload does not hop between beams on every syllable.
@@ -986,6 +1093,21 @@ def run_odas():
                     cur[0], lead[0] = best, 0
             else:
                 lead[0] = 0
+            if by_mic:
+                heard = MIC.take(FRAME_SAMPLES * 2)
+                if not heard:
+                    if OFFLINE:
+                        one.flush()
+                        PENDING.join()
+                        return 0
+                    log("error: no sound from the canceller for mic mode")
+                    proc.kill()
+                    return 1
+                if MIC.lost:
+                    log("warn: ODAS fell behind; %d stretches of microphone sound skipped" % MIC.lost)
+                    MIC.lost = 0
+                one.feed(heard)
+                continue
             i = cur[0]
             pf, sp = a[:, i].tobytes(), b[:, i].tobytes()
             one.feed(a[:, best].tobytes(), {"separated": sp, "both": (sp, pf)}.get(ODAS_SEND, pf))

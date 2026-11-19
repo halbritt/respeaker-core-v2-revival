@@ -73,9 +73,22 @@ arecord (8 ch, 16 kHz, S32) --> rsp-aec --FIFO--> odaslive --+-- tracked sources
   transcripts carry `"untracked": true` and no direction.
 - The postfiltered stream (noise-masked) decides when someone is speaking; the separated
   stream (plain beamformer) is what is sent to Whisper, which recognises it slightly better.
-- `STT_ODAS_MODE=dominant` (default) produces one stream that follows the loudest tracked
-  source, so a talker who moves, or whose reflection is tracked as a second source, stays one
-  utterance. `separate` segments each tracked source on its own.
+- `STT_ODAS_MODE=dominant` (the program's default) produces one stream that follows the
+  loudest tracked source, so a talker who moves, or whose reflection is tracked as a second
+  source, stays one utterance. `separate` segments each tracked source on its own.
+- `STT_ODAS_MODE=mic` (set in `rsp-stt.env`) detects speech on, and sends, one microphone
+  after the echo canceller (`STT_MIC_CHANNEL`, 0). ODAS then only supplies the direction.
+  Measured on a 459-word reading with the board talking over part of it, replayed through
+  both modes: 9.6% word error rate in `mic` mode against 39% in `dominant` mode, where runs
+  of 17 to 36 words were never sent because ODAS had lost the talker or its filtered stream
+  had gone quiet. On an older take recorded with clipping microphones the two modes were
+  equal (50% and 52%). At a few metres one microphone is recognised as well as a beam from
+  this array (5 to 6% for both, cut by hand); the beam is not what was missing.
+  - In this mode an utterance is cut where the board's speaker starts and where it has
+    stopped, so that the board's voice and a person are judged separately.
+  - Known gap: once the canceller has settled, what is left of the board's voice no longer
+    resembles what was played, and the own-voice check can miss it. One 6 s prompt came
+    through as 17 garbled words in the same take. `dominant` mode did not hear it at all.
 - Utterances end after 1.5 s of silence, or at the next short pause once they pass 12 s, with
   a hard cap of 25 s.
 - Before an utterance is sent, a speech gate ([Silero VAD](https://github.com/snakers4/silero-vad)
