@@ -850,7 +850,7 @@ def test_the_image_installs_and_enables_the_cpu_frequency_policy() -> None:
     """Armbian's 25% threshold kept the CPU at top voltage; ours must be set after Armbian's."""
     from conftest import BOARD_DIR, NEWOS_DIR
     unit = (BOARD_DIR / "rsp-cpufreq.service").read_text(encoding="utf-8")
-    assert "After=armbian-hardware-optimization.service" in unit
+    assert "After=armbian-hardware-optimize.service" in unit
     assert "echo 85 > /sys/devices/system/cpu/cpufreq/ondemand/up_threshold" in unit
     script = (NEWOS_DIR / "mk-sd-image.sh").read_text(encoding="utf-8")
     assert "board/rsp-cpufreq.service" in script

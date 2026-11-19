@@ -4,7 +4,7 @@ Description=ReSpeaker CPU frequency policy (stay at a low voltage unless a core 
 # keeps one core about half busy, so the CPU sat at 1464 MHz and 1.40 V nearly all the
 # time. At 85% it settles around 1008-1200 MHz (1.175-1.275 V) for the same work and still
 # rises when more is asked of it.
-After=armbian-hardware-optimization.service
+After=armbian-hardware-optimize.service
 
 [Service]
 Type=oneshot
