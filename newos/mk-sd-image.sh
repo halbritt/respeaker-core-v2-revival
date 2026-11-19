@@ -302,7 +302,8 @@ install -m 755 "$HERE/../board/rsp-record" "$HERE/../board/rsp-replay" "$HERE/..
 install -m 644 "$HERE/../board/rsp-leds.service" "$HERE/../board/rsp-led-power.service" "$R/etc/systemd/system/"
 install -D -m 644 "$HERE/../board/60-rsp-leds.rules" "$R/etc/udev/rules.d/60-rsp-leds.rules"
 install -m 644 "$HERE/../board/asound.conf" "$R/etc/asound.conf"   # default output: the speaker, with a software volume
-for u in rsp-leds rsp-led-power; do
+install -m 644 "$HERE/../board/rsp-cpufreq.service" "$R/etc/systemd/system/"
+for u in rsp-leds rsp-led-power rsp-cpufreq; do
 	ln -sf /etc/systemd/system/$u.service "$R/etc/systemd/system/multi-user.target.wants/$u.service"
 done
 # site settings (not in the repository): at least STT_SERVER=http://<whisper host>:8910/inference

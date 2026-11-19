@@ -371,6 +371,12 @@ the command line means `bringup`.
   0.90-0.95 of full scale while the board speaks at its usual volume.
 - The kernel's USB PHY use-after-free (see above) is worked around in the device tree; a fix
   for the driver is in `newos/port/patches/` and has not been sent upstream.
+- CPU frequency: Armbian's `ondemand` governor goes to full speed at 25% load, and the
+  pipeline keeps one core about half busy, so the CPU sat at 1464 MHz and 1.40 V for 96%
+  of the time (this chip has no deep idle state). `rsp-cpufreq.service` sets the threshold
+  to 85%: it then ran 75% of the time at 1200 MHz or below (1.275 V or less) with ODAS at
+  60% of a core, and still rises under load. The work done is the same. The saving in
+  watts has not been measured; the board has no power sensor.
 - Mic gain is 14 dB at the converters, and `rsp-aec --gain 10` (in `STT_AEC_ARGS`) raises
   the microphones by 10 dB after cancellation, so a talker has the level they had at 24 dB.
   At 24 dB the board's own speaker clipped the converters (tens of thousands of samples

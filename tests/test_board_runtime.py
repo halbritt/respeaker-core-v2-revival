@@ -844,3 +844,14 @@ def test_f3_t2_rsp_replay_keeps_environment_overrides_that_contain_spaces(tmp_pa
     env_seen = json.loads(captured_env.read_text(encoding="utf-8"))
     assert env_seen["STT_NOISE_PHRASES"] == phrases
     assert env_seen["STT_LANGUAGE"] == "de"            # still beats the defaults file
+
+
+def test_the_image_installs_and_enables_the_cpu_frequency_policy() -> None:
+    """Armbian's 25% threshold kept the CPU at top voltage; ours must be set after Armbian's."""
+    from conftest import BOARD_DIR, NEWOS_DIR
+    unit = (BOARD_DIR / "rsp-cpufreq.service").read_text(encoding="utf-8")
+    assert "After=armbian-hardware-optimization.service" in unit
+    assert "echo 85 > /sys/devices/system/cpu/cpufreq/ondemand/up_threshold" in unit
+    script = (NEWOS_DIR / "mk-sd-image.sh").read_text(encoding="utf-8")
+    assert "board/rsp-cpufreq.service" in script
+    assert "for u in rsp-leds rsp-led-power rsp-cpufreq; do" in script
