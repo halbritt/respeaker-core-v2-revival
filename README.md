@@ -86,9 +86,20 @@ arecord (8 ch, 16 kHz, S32) --> rsp-aec --FIFO--> odaslive --+-- tracked sources
   this array (5 to 6% for both, cut by hand); the beam is not what was missing.
   - In this mode an utterance is cut where the board's speaker starts and where it has
     stopped, so that the board's voice and a person are judged separately.
-  - Known gap: once the canceller has settled, what is left of the board's voice no longer
-    resembles what was played, and the own-voice check can miss it. One 6 s prompt came
-    through as 17 garbled words in the same take. `dominant` mode did not hear it at all.
+  - While the board speaks, a sound counts as speech only where the canceller's output is
+    within 9 dB of its input (`STT_BESIDE_DB`). What the canceller leaves of the board's own
+    voice no longer resembles what was played, so the own-voice check misses it, but it is
+    13 dB or more below the microphone before the canceller; a person is in both alike.
+    Replayed with and without this rule: the 459-word reading 7.2% against 9.6% (a board
+    prompt that had come through as 17 garbled words is gone, four words of the reader are
+    lost), the older clipped take 27% against 50%, and two recordings of the board reading
+    aloud in an empty room no transcript at all against one and two wrong ones.
+  - Over the board's voice a person is heard in pieces, so an utterance there ends only
+    after 1.5 s without them (`STT_PLAY_END_SILENCE_MS`).
+  - Limits: the rule needs the speaker to stay within its clean range. At +4.8 dB of playback
+    gain a linear filter still removed 19 to 21 dB of the speaker; at 0 dB it removed all of
+    it down to the room's noise. With someone moving beside the board while it read aloud,
+    parts of the board's speech were still transcribed.
 - Utterances end after 1.5 s of silence, or at the next short pause once they pass 12 s, with
   a hard cap of 25 s.
 - Before an utterance is sent, a speech gate ([Silero VAD](https://github.com/snakers4/silero-vad)

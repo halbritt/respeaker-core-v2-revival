@@ -484,7 +484,7 @@ def _mic_recording(frames_quiet: int, frames_talk: int, frames_tail: int, play: 
 
 
 def _run_mode(tmp_path: Path, whisper_mock_factory, mode: str, canceller: bool = True, track: bool = False, extra=None,
-              recording_bytes: bytes | None = None):
+              recording_bytes: bytes | None = None, aec_script: str | None = None):
     base_url, captured = whisper_mock_factory("someone is talking")
     fake = tmp_path / "deaf_odaslive.py"
     fake.write_text(DEAF_ODASLIVE, encoding="utf-8")
@@ -493,7 +493,7 @@ def _run_mode(tmp_path: Path, whisper_mock_factory, mode: str, canceller: bool =
     fake_bin.chmod(0o755)
     aec = tmp_path / "rsp-aec"
     if canceller:
-        aec.write_text(PASS_AEC, encoding="utf-8")
+        aec.write_text(aec_script or PASS_AEC, encoding="utf-8")
         aec.chmod(0o755)
     recording = tmp_path / "take.raw"
     recording.write_bytes(recording_bytes or _mic_recording(20, 40, 30))
@@ -592,3 +592,80 @@ def test_mic_mode_cuts_an_utterance_where_the_boards_speaker_starts(tmp_path: Pa
 def test_mic_mode_without_playback_keeps_one_utterance(tmp_path: Path, whisper_mock_factory) -> None:
     marks, _, _ = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=_mic_recording(20, 80, 30))
     assert len(marks) == 1 and len([m for m in marks[0] if m]) == 80
+
+
+# stand-in canceller that cancels: the echo in microphone 0 is four times loopback channel 7,
+# and it takes exactly that away. --gain DB is applied afterwards, as rsp-aec does.
+CANCELLING_AEC = f"""#!{sys.executable}
+import sys
+import numpy as np
+gain = 10 ** (float(sys.argv[sys.argv.index('--gain') + 1]) / 20) if '--gain' in sys.argv else 1.0
+step = 480 * 8 * 4
+while True:
+    raw = sys.stdin.buffer.read(step)
+    if len(raw) < step:
+        break
+    a = np.frombuffer(raw, dtype='<i4').reshape(-1, 8).astype(np.int64)
+    a[:, 0] = np.clip((a[:, 0] - 4 * a[:, 6]) * gain, -2**31, 2**31 - 1)
+    sys.stdout.buffer.write(a.astype('<i4').tobytes())
+    sys.stdout.buffer.flush()
+"""
+
+
+def _board_recording(frames: int, play: tuple[int, int], talk: tuple[int, int] | None = None) -> bytes:
+    """8 channels S32. The board's speaker plays during `play` = (first frame, frames) and is
+    heard in microphone 0, with a distorted part (8% of it) that no canceller can take away
+    and that resembles nothing that was played. `talk`: a person, in microphone 0 as well."""
+    rng = np.random.default_rng(11)
+    a = np.zeros((frames * 480, 8), dtype=np.int64)
+    span = slice(play[0] * 480, (play[0] + play[1]) * 480)
+    played = rng.integers(-(2**27), 2**27, play[1] * 480)
+    a[span, 6] = a[span, 7] = played
+    a[span, 0] = 4 * played + rng.integers(-(2**29), 2**29, play[1] * 480) * 8 // 100
+    if talk:
+        said = slice(talk[0] * 480, (talk[0] + talk[1]) * 480)
+        a[said, 0] += rng.integers(-6000, 6000, talk[1] * 480) << 16
+    return a.astype("<i4").tobytes()
+
+
+def test_mic_mode_does_not_send_what_the_canceller_leaves_of_the_boards_voice(tmp_path: Path, whisper_mock_factory) -> None:
+    """The leftover is loud enough to be taken for speech and matches nothing that was played.
+    It is still only a small part of what the microphone heard, and that gives it away."""
+    take = _board_recording(160, play=(20, 100))
+    marks, rows, log = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=take, aec_script=CANCELLING_AEC)
+    assert marks == [] and rows == [], log
+
+
+def test_mic_mode_knows_the_leftover_when_the_canceller_adds_gain(tmp_path: Path, whisper_mock_factory) -> None:
+    take = _board_recording(160, play=(20, 100))
+    marks, rows, log = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=take, aec_script=CANCELLING_AEC,
+                                 extra={"STT_AEC_ARGS": "--gain 10"})
+    assert marks == [] and rows == [], log
+
+
+def test_mic_mode_sends_a_person_talking_over_the_board(tmp_path: Path, whisper_mock_factory) -> None:
+    take = _board_recording(200, play=(20, 150), talk=(60, 60))
+    marks, rows, log = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=take, aec_script=CANCELLING_AEC,
+                                 extra={"STT_PLAY_END_SILENCE_MS": "150"})
+    assert len(marks) == 1 and len(rows) == 1, log
+    # the person's 60 frames, the 300 ms before them and the silence that ended the utterance
+    assert 60 <= len(marks[0]) <= 60 + 10 + 6, len(marks[0])
+
+
+def test_mic_mode_hears_a_short_word_said_over_the_board(tmp_path: Path, whisper_mock_factory) -> None:
+    take = _board_recording(200, play=(20, 150), talk=(80, 12))
+    marks, rows, log = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=take, aec_script=CANCELLING_AEC,
+                                 extra={"STT_PLAY_END_SILENCE_MS": "150"})
+    assert len(marks) == 1 and len(rows) == 1, log
+    assert 12 <= len(marks[0]) <= 12 + 10 + 6, len(marks[0])
+
+
+def test_mic_mode_waits_longer_for_a_person_to_go_on_while_the_board_speaks(tmp_path: Path, whisper_mock_factory) -> None:
+    """Over the board's voice a person is heard in pieces: where the board is louder they
+    seem to have stopped. Two pieces half a second apart are one utterance."""
+    rng = np.random.default_rng(5)
+    a = np.frombuffer(_board_recording(220, play=(20, 180), talk=(60, 30)), dtype="<i4").reshape(-1, 8).copy()
+    again = slice(107 * 480, 137 * 480)
+    a[again, 0] += (rng.integers(-6000, 6000, 30 * 480) << 16).astype("<i4")
+    marks, rows, log = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=a.tobytes(), aec_script=CANCELLING_AEC)
+    assert len(marks) == 1 and len(rows) == 1, log

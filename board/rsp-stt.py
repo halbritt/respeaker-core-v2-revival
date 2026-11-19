@@ -58,6 +58,10 @@ LANGUAGE  = env("STT_LANGUAGE", "en")
 START_RATIO = env("STT_START_RATIO", 3.0, float)   # speech = rms > noise floor * ratio
 MIN_RMS   = env("STT_MIN_RMS", 150, int)           # ...and above this absolute level
 END_SIL_MS = env("STT_END_SILENCE_MS", 800, int)
+# mic mode, while the board speaks: a person is heard in pieces, so wait longer for the next one
+PLAY_END_SIL_MS = env("STT_PLAY_END_SILENCE_MS", 1500, int)
+# mic mode: a sound is not the board's own while the canceller's output is within this many dB of its input
+BESIDE_DB = env("STT_BESIDE_DB", -9.0, float)
 PRE_MS    = env("STT_PREROLL_MS", 300, int)
 MIN_MS    = env("STT_MIN_UTTERANCE_MS", 400, int)
 MAX_S     = env("STT_MAX_UTTERANCE_S", 25, float)
@@ -300,6 +304,56 @@ class PlayedLog:
         return sum(b is not None for b in span) / float(m) if m else 0.0
 
 PLAYED = PlayedLog()
+
+class BesideLog:
+    """Mic mode: block by block, is anything heard besides the board's own voice?
+
+    What the canceller leaves of the board's voice is distorted and no longer matches what
+    was played (PlayedLog finds 3% or less of it). It is still far weaker than the echo it
+    is the rest of: measured on the board, 13 to 16 dB below the microphone before the
+    canceller. A person adds the same to both sides, so with them the output comes close
+    to the input. Measured over a recording with a reader 13 dB quieter than the board:
+    blocks within 9 dB covered 90 to 97% of the reading and nothing of the board alone."""
+    BAND = slice(300 * PlayedLog.BLOCK // RATE, 3500 * PlayedLog.BLOCK // RATE)
+
+    def __init__(self):
+        self.blocks = collections.deque(maxlen=4000)       # None = speaker silent, else True/False
+        self.n = 0
+        self.before = collections.deque()                  # microphone power of blocks still in the canceller
+        self.hold = 0
+        self.win = np.hanning(PlayedLog.BLOCK) if np is not None else None
+        gain = re.search(r"--gain\s+(-?[0-9.]+)", AEC_ARGS)
+        self.limit = 10 ** ((BESIDE_DB + (float(gain.group(1)) if gain else 0.0)) / 10)
+
+    def power(self, a):
+        x = (a[:, MIC_CHANNEL] >> 16).astype(np.float64)
+        return float((np.abs(np.fft.rfft(x * self.win)[self.BAND]) ** 2).sum())
+
+    def goes_in(self, raw):
+        """raw: one block as captured, on its way into the canceller."""
+        a = np.frombuffer(raw, dtype="<i4").reshape(-1, CHANNELS)
+        if np.abs(a[:, MICS:].sum(axis=1, dtype=np.int64) >> 13).max() > Loopback.QUIET:
+            self.hold = Loopback.HOLD
+        elif self.hold > 0:
+            self.hold -= 1
+        self.before.append(self.power(a) if self.hold > 0 and len(a) == PlayedLog.BLOCK else None)
+
+    def comes_out(self, raw):
+        """raw: the same block as the canceller returns it."""
+        was = self.before.popleft() if self.before else None
+        if was is None:
+            self.blocks.append(None)
+        else:
+            now = self.power(np.frombuffer(raw, dtype="<i4").reshape(-1, CHANNELS))
+            self.blocks.append(now + 1.0 > self.limit * (was + 1.0))
+        self.n += 1
+
+    def only_board(self, k):
+        """Is the board's own voice all there is in block k of the stream?"""
+        j = k - (self.n - len(self.blocks))
+        return 0 <= j < len(self.blocks) and self.blocks[j] is False
+
+BESIDE = None                                  # set up in mic mode
 
 def preload_played(path):
     """Replay: take what the speaker played from the recording's own loopback channels, so a
@@ -690,6 +744,9 @@ class Segmenter:
         rms = rms16(mono)
         loud = rms > max(self.min_rms, self.floor * START_RATIO)
         self.n += 1
+        own = BESIDE is not None and self.cut_on_playback and BESIDE.only_board(self.n - 1)
+        if own:
+            loud = False                              # however loud: this is what is left of the board's voice
         if DEBUG and self.n % 100 == 0:
             log("debug: %s rms=%d floor=%.0f speaking=%s" % (self.name, rms, self.floor, self.speaking))
         if not self.speaking:
@@ -697,7 +754,8 @@ class Segmenter:
                 self.was_playing = PLAYED.playing(self.n)
             # track the noise floor only while idle: fast down, slow up
             f = self.floor
-            self.floor = min(rms, f) * 0.5 + f * 0.5 if rms < f else f * 0.995 + rms * 0.005
+            if not own:                               # the board's voice is not the room's noise
+                self.floor = min(rms, f) * 0.5 + f * 0.5 if rms < f else f * 0.995 + rms * 0.005
             self.recent.append(loud)
             self.pre.append((payload, rms))
             if sum(self.recent) >= 5:
@@ -724,11 +782,13 @@ class Segmenter:
         too_long = len(self.utt) * FRAME_MS >= MAX_S * 1000
         long_enough = len(self.utt) * FRAME_MS >= SOFT_S * 1000
         soft_end = long_enough and self.silence_ms >= SOFT_SIL_MS
-        turn = False
+        turn, end_sil = False, END_SIL_MS
         if self.cut_on_playback and AEC:
             playing = PLAYED.playing(self.n)
             turn, self.was_playing = playing != self.was_playing, playing
-        if self.silence_ms >= END_SIL_MS or too_long or soft_end or turn:
+            if playing and BESIDE is not None:
+                end_sil = max(END_SIL_MS, PLAY_END_SIL_MS)
+        if self.silence_ms >= end_sil or too_long or soft_end or turn:
             self.finish()
 
     def flush(self):
@@ -896,6 +956,8 @@ def capture_to(fifo):
             leave("arecord ended (exit %s)" % proc.poll())
         if helper is not None:
             try:
+                if BESIDE is not None:
+                    BESIDE.goes_in(raw)
                 helper.stdin.write(raw)
                 helper.stdin.flush()
             except (BrokenPipeError, OSError):
@@ -981,11 +1043,33 @@ def tee_to_odas(src, out):
             if not raw:
                 break
             out.write(raw)
+            if BESIDE is not None:
+                BESIDE.comes_out(raw)
             MIC.put(raw)
     except (BrokenPipeError, OSError):
         pass
     finally:
         MIC.close()
+
+def feed_canceller(take, to):
+    """Replay: give the canceller a recording block by block, as the capture would."""
+    block = RATE * 30 // 1000 * CHANNELS * 4
+    try:
+        while True:
+            raw = take.read(block)
+            if len(raw) == block and BESIDE is not None:
+                BESIDE.goes_in(raw)
+            if raw:
+                to.write(raw)
+            if len(raw) < block:
+                break
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        try:
+            to.close()
+        except OSError:
+            pass
 
 def native_aec():
     """The native canceller's command line, or None when it is off or not installed."""
@@ -993,12 +1077,18 @@ def native_aec():
         return [AEC_BIN] + AEC_ARGS.split()
     return None
 
+if mic_mode():
+    BESIDE = BesideLog()
+    if OFFLINE:
+        BESIDE.blocks = collections.deque()    # the whole take
+
 def replay_to(fifo, path):
     """Replay: feed a recording to ODAS through the native canceller, as the capture would be."""
     out = open(fifo, "wb", buffering=0)                       # blocks until odaslive opens it
     with open(path, "rb") as take:
         if mic_mode():
-            helper = subprocess.Popen(native_aec(), stdin=take, stdout=subprocess.PIPE)
+            helper = subprocess.Popen(native_aec(), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            threading.Thread(target=feed_canceller, args=(take, helper.stdin), daemon=True).start()
             tee_to_odas(helper.stdout, out)
             helper.wait()
         else:
