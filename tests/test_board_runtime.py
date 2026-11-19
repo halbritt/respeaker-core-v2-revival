@@ -855,3 +855,13 @@ def test_the_image_installs_and_enables_the_cpu_frequency_policy() -> None:
     script = (NEWOS_DIR / "mk-sd-image.sh").read_text(encoding="utf-8")
     assert "board/rsp-cpufreq.service" in script
     assert "for u in rsp-leds rsp-led-power rsp-cpufreq; do" in script
+
+
+def test_the_settings_file_can_be_read_by_the_shell_as_well_as_by_systemd() -> None:
+    """rsp-replay sources it; an unquoted value with a space ran its second word as a command."""
+    import subprocess
+    from conftest import BOARD_DIR
+    res = subprocess.run(["sh", "-c", '. "$1" && printf %s "$STT_AEC_ARGS"', "sh", str(BOARD_DIR / "rsp-stt.env")],
+                         capture_output=True, text=True, timeout=10, check=False)
+    assert res.returncode == 0 and res.stderr == "", res.stderr
+    assert res.stdout == "--gain 10"
