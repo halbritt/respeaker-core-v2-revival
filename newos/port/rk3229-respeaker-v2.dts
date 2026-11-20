@@ -12,6 +12,14 @@
 #include <dt-bindings/leds/common.h>
 #include "rk3229.dtsi"
 
+/*
+ * The clock of the on-chip codec's analogue part. Armbian's kernel adds it
+ * (driver-rk322x-audio-codec.patch); mainline headers do not have the name yet.
+ */
+#ifndef PCLK_ACODECPHY
+#define PCLK_ACODECPHY		368
+#endif
+
 / {
 	model = "Seeed ReSpeaker Core v2.0";
 	compatible = "seeed,respeaker-core-v2", "rockchip,rk3229";
