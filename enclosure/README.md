@@ -90,7 +90,7 @@ Each part is designed to print without supports, standing as it stands in the fi
     python3 enclosure.py out/
 
 This writes `base`, `body` and `deck` as STEP and STL, and `assembly.step` with simple
-stand-ins for the board and the driver. It also reports any two parts that overlap and the
+stand-ins for the board, the driver and the screws. It also reports any two parts that overlap and the
 volume of the chamber. Every dimension is a named constant at the top of the script.
 
 ## Where the dimensions come from

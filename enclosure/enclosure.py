@@ -31,6 +31,7 @@ UNDER_BOARD = 17.0            # tallest part under the board is the USB socket, 
 DRIVER_HOLES = 46.85          # square pattern, centre to centre
 DRIVER_CUTOUT = 55.0          # clears the surround, which stands 3.5 proud of the flange
 DRIVER_FLANGE = 65.0
+FLANGE_THICK = 1.2
 DRIVER_DEPTH = 44.0           # behind the flange
 
 # ---- the enclosure -------------------------------------------------------------------------
@@ -174,14 +175,35 @@ def board_stand_in():
 
 def driver_stand_in():
     """The driver as turned shapes: flange, basket, magnet. Flange underside on z = 0."""
-    flange = Box(64, 64, 1.2, align=LOW)
+    h = DRIVER_HOLES / 2
+    flange = Box(64, 64, FLANGE_THICK, align=LOW)
     solid = fillet(flange.edges().filter_by(Axis.Z), 9)
+    solid -= [Pos(x, y, 0) * Cylinder(2.15, FLANGE_THICK, align=LOW) for x in (-h, h) for y in (-h, h)]
     solid += Cylinder(25.5, 14, align=LOW)
     solid += Pos(0, 0, 14) * Cone(25.5, 17.75, 8, align=LOW)
     solid += Cylinder(17.75, DRIVER_DEPTH, align=LOW)
     solid += Cylinder(26.9, 3.5, align=HIGH)                # surround, in front of the flange
     solid += Pos(0, 28, 5) * Box(8, 6, 9, align=LOW)        # terminals
     return solid
+
+
+def screw(length, down=True):
+    """An M3 pan-head screw: underside of the head on z = 0, shank pointing down (or up)."""
+    solid = Cylinder(2.8, 2.0, align=LOW) + Cylinder(1.5, length, align=HIGH)
+    return solid if down else Rot(180, 0, 0) * solid
+
+
+def screws():
+    """Every screw in its place in the assembled stack. For looking at, not for printing."""
+    z_body = BASE_PLATE + THROAT
+    z_deck = z_body + BODY_H
+    h = DRIVER_HOLES / 2
+    found = [Pos(x, y, z_body + BAFFLE + FLANGE_THICK) * screw(6)             # driver to baffle
+             for x in (-h, h) for y in (-h, h)]
+    found += ring(BOSS_AT, 6, Pos(0, 0, z_deck + DECK_FLOOR) * screw(8))       # deck to body
+    found += ring(BOSS_AT, 6, Pos(0, 0, z_body - 9) * screw(14, down=False))   # base to body
+    found += [Pos(x, y, z_deck + DECK_H) * screw(8) for x, y in BOARD_HOLES]   # board to posts
+    return Compound(children=found)
 
 
 def parts():
@@ -214,7 +236,7 @@ def main(out):
     whole = Compound(children=list(placed.values()))
     for (name, part) in placed.items():
         part.label = name
-    export_step(whole, str(out / "assembly.step"))
+    export_step(Compound(children=list(parts().values()) + [screws()]), str(out / "assembly.step"))
     names = list(placed)
     for i, a in enumerate(names):
         for b in names[i + 1:]:
