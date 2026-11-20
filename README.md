@@ -96,6 +96,9 @@ arecord (8 ch, 16 kHz, S32) --> rsp-aec --FIFO--> odaslive --+-- tracked sources
     aloud in an empty room no transcript at all against one and two wrong ones.
   - Over the board's voice a person is heard in pieces, so an utterance there ends only
     after 1.5 s without them (`STT_PLAY_END_SILENCE_MS`).
+  - After a start the canceller knows nothing of the speaker, and the first playback put
+    three wrong words in the transcript. Until it has heard 3 s of playback
+    (`STT_BESIDE_WARM_MS`), everything heard while the board speaks is taken for the board.
   - Limits: the rule needs the speaker to stay within its clean range. At +4.8 dB of playback
     gain a linear filter still removed 19 to 21 dB of the speaker; at 0 dB it removed all of
     it down to the room's noise. With someone moving beside the board while it read aloud,

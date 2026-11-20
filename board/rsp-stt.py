@@ -62,6 +62,8 @@ END_SIL_MS = env("STT_END_SILENCE_MS", 800, int)
 PLAY_END_SIL_MS = env("STT_PLAY_END_SILENCE_MS", 1500, int)
 # mic mode: a sound is not the board's own while the canceller's output is within this many dB of its input
 BESIDE_DB = env("STT_BESIDE_DB", -9.0, float)
+# ...and only once the canceller has heard this much playback since the start; until then all is the board's
+BESIDE_WARM_MS = env("STT_BESIDE_WARM_MS", 3000, int)
 PRE_MS    = env("STT_PREROLL_MS", 300, int)
 MIN_MS    = env("STT_MIN_UTTERANCE_MS", 400, int)
 MAX_S     = env("STT_MAX_UTTERANCE_S", 25, float)
@@ -321,6 +323,7 @@ class BesideLog:
         self.n = 0
         self.before = collections.deque()                  # microphone power of blocks still in the canceller
         self.hold = 0
+        self.heard = 0                                     # blocks of playback the canceller has had
         self.win = np.hanning(PlayedLog.BLOCK) if np is not None else None
         gain = re.search(r"--gain\s+(-?[0-9.]+)", AEC_ARGS)
         self.limit = 10 ** ((BESIDE_DB + (float(gain.group(1)) if gain else 0.0)) / 10)
@@ -344,8 +347,11 @@ class BesideLog:
         if was is None:
             self.blocks.append(None)
         else:
+            self.heard += 1
             now = self.power(np.frombuffer(raw, dtype="<i4").reshape(-1, CHANNELS))
-            self.blocks.append(now + 1.0 > self.limit * (was + 1.0))
+            # an untrained canceller returns the board's voice whole, which would pass for a person
+            trained = self.heard * 30 > BESIDE_WARM_MS
+            self.blocks.append(trained and now + 1.0 > self.limit * (was + 1.0))
         self.n += 1
 
     def only_board(self, k):

@@ -582,7 +582,8 @@ def test_mic_mode_cuts_an_utterance_where_the_boards_speaker_starts(tmp_path: Pa
     must not be judged together with what came after."""
     # the talker speaks during frames 20-99; the board plays from frame 60 to the end
     take = _mic_recording(20, 80, 30, play=(60, 70))
-    marks, rows, log = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=take)
+    # the warm-up of the canceller is another test's subject
+    marks, rows, log = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=take, extra={"STT_BESIDE_WARM_MS": "0"})
     voiced = [len([m for m in u if m]) for u in marks]
     assert len(voiced) == 2, log
     assert sum(voiced) == 80, "no frame of the talker is lost at the cut"
@@ -646,7 +647,7 @@ def test_mic_mode_knows_the_leftover_when_the_canceller_adds_gain(tmp_path: Path
 def test_mic_mode_sends_a_person_talking_over_the_board(tmp_path: Path, whisper_mock_factory) -> None:
     take = _board_recording(200, play=(20, 150), talk=(60, 60))
     marks, rows, log = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=take, aec_script=CANCELLING_AEC,
-                                 extra={"STT_PLAY_END_SILENCE_MS": "150"})
+                                 extra={"STT_PLAY_END_SILENCE_MS": "150", "STT_BESIDE_WARM_MS": "0"})
     assert len(marks) == 1 and len(rows) == 1, log
     # the person's 60 frames, the 300 ms before them and the silence that ended the utterance
     assert 60 <= len(marks[0]) <= 60 + 10 + 6, len(marks[0])
@@ -655,7 +656,7 @@ def test_mic_mode_sends_a_person_talking_over_the_board(tmp_path: Path, whisper_
 def test_mic_mode_hears_a_short_word_said_over_the_board(tmp_path: Path, whisper_mock_factory) -> None:
     take = _board_recording(200, play=(20, 150), talk=(80, 12))
     marks, rows, log = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=take, aec_script=CANCELLING_AEC,
-                                 extra={"STT_PLAY_END_SILENCE_MS": "150"})
+                                 extra={"STT_PLAY_END_SILENCE_MS": "150", "STT_BESIDE_WARM_MS": "0"})
     assert len(marks) == 1 and len(rows) == 1, log
     assert 12 <= len(marks[0]) <= 12 + 10 + 6, len(marks[0])
 
@@ -667,5 +668,21 @@ def test_mic_mode_waits_longer_for_a_person_to_go_on_while_the_board_speaks(tmp_
     a = np.frombuffer(_board_recording(220, play=(20, 180), talk=(60, 30)), dtype="<i4").reshape(-1, 8).copy()
     again = slice(107 * 480, 137 * 480)
     a[again, 0] += (rng.integers(-6000, 6000, 30 * 480) << 16).astype("<i4")
-    marks, rows, log = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=a.tobytes(), aec_script=CANCELLING_AEC)
+    marks, rows, log = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=a.tobytes(), aec_script=CANCELLING_AEC,
+                                 extra={"STT_BESIDE_WARM_MS": "0"})
     assert len(marks) == 1 and len(rows) == 1, log
+
+
+def test_mic_mode_trusts_the_canceller_only_after_it_has_heard_the_speaker_for_three_seconds(tmp_path: Path, whisper_mock_factory) -> None:
+    """After a start the canceller knows nothing of the speaker and lets the board's voice
+    through whole, which looks like a person. Measured on the board: the first playback after
+    a restart put three wrong words in the transcript. Until the canceller has heard three
+    seconds of playback, nothing said over it counts; the cost is a person's words then."""
+    # the board plays from frame 20; the same person-like sound at frames 40-70 and 160-190
+    rng = np.random.default_rng(5)
+    a = np.frombuffer(_board_recording(260, play=(20, 220), talk=(40, 30)), dtype="<i4").reshape(-1, 8).copy()
+    a[160 * 480:190 * 480, 0] += (rng.integers(-6000, 6000, 30 * 480) << 16).astype("<i4")
+    marks, rows, log = _run_mode(tmp_path, whisper_mock_factory, "mic", recording_bytes=a.tobytes(), aec_script=CANCELLING_AEC,
+                                 extra={"STT_PLAY_END_SILENCE_MS": "150"})
+    assert len(marks) == 1 and len(rows) == 1, log
+    assert rows[0]["t"] > 5.0, "only the later one is heard: %s" % rows
