@@ -5,6 +5,8 @@ table-top unit: 110 mm across its corners, 97 mm across its flats, 151 mm tall.
 
 Status: designed and checked in CAD only. Nothing has been printed or measured yet.
 
+The [TPU board mount variant](PCB-ISOLATION.md) adds a screw-free suspension for the microphone board, with a revised deck and a small fit gauge.
+
 ## The shape, and why
 
 A hexagonal column, the same outline as the board, in three parts:
