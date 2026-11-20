@@ -83,6 +83,15 @@ Stuffing the chamber loosely with polyester wadding is worth doing.
 
 ## Printing
 
+Bambu Studio projects for the H2S with a 0.4 mm nozzle and textured PEI plate:
+
+| Board mount | Project | Plates in order |
+| --- | --- | --- |
+| TPU suspension | [PETG enclosure and TPU mounts](print/ReSpeaker-Core-v2-TPU-Isolated-H2S.3mf) | PETG socket gauge, five TPU mounts, deck and baffle fit test, body and base |
+| Screw posts | [All-PETG enclosure](print/ReSpeaker-Core-v2-H2S-PETG.3mf) | Deck and baffle fit test, body and base |
+
+Both projects include an [8 mm baffle section](out/baffle-fit.stl) for checking the driver and heat-set inserts. The [OpenSCAD source](baffle-fit.scad) cuts it from the existing body mesh.
+
 Each part is designed to print without supports, standing as it stands in the finished case. The walls are
 3.2 mm. The body is the largest part at 110 x 97 x 106 mm and takes about 180 cm³ of plastic.
 
