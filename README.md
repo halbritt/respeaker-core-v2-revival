@@ -92,7 +92,7 @@ arecord (8 ch, 16 kHz, S32) --> rsp-aec --FIFO--> odaslive --+-- tracked sources
     13 dB or more below the microphone before the canceller; a person is in both alike.
     Replayed with and without this rule: the 459-word reading 7.2% against 9.6% (a board
     prompt that had come through as 17 garbled words is gone, four words of the reader are
-    lost), the older clipped take 27% against 50%, and two recordings of the board reading
+    lost), the older clipped take 17% and 27% in two replays against 50%, and two recordings of the board reading
     aloud in an empty room no transcript at all against one and two wrong ones.
   - Over the board's voice a person is heard in pieces, so an utterance there ends only
     after 1.5 s without them (`STT_PLAY_END_SILENCE_MS`).
