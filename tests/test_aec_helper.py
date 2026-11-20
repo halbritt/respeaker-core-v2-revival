@@ -313,3 +313,18 @@ def test_replay_feeds_a_recording_to_odas_through_the_same_canceller(rsp_stt_loa
     want = np.frombuffer(_capture(), dtype="<i4").reshape(-1, CH).copy()
     want[:, :6] = -want[:, :6]
     assert np.array_equal(np.frombuffer(got[0], dtype="<i4").reshape(-1, CH), want)
+
+
+def test_when_odas_stalls_the_microphone_tap_says_how_much_sound_it_let_go(rsp_stt_loader, tmp_path: Path) -> None:
+    """The tap keeps four seconds. What it drops must be whole frames and counted, or every
+    later utterance is matched against the wrong moment of what the speaker played."""
+    stt = rsp_stt_loader(env={"STT_AEC_BIN": str(_fake(tmp_path))})
+    tap = stt.MicTap()
+    frame = np.zeros((480, 8), dtype="<i4").tobytes()
+    for _ in range(200):                                   # six seconds, nobody taking
+        tap.put(frame)
+    kept = len(tap.buf) // 2 // 480
+    assert len(tap.buf) % (480 * 2) == 0, "whole frames only"
+    assert kept < 200
+    assert tap.skipped() == 200 - kept, "every frame is either kept or counted as skipped"
+    assert tap.skipped() == 0, "and counted once"

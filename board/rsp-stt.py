@@ -1001,6 +1001,7 @@ class MicTap:
 
     def __init__(self):
         self.buf, self.cond, self.closed, self.lost = bytearray(), threading.Condition(), False, 0
+        self.gone = 0                          # frames dropped and not yet reported by skipped()
 
     def put(self, raw):
         """raw: S32 frames of all CHANNELS, as they go to ODAS."""
@@ -1008,10 +1009,18 @@ class MicTap:
         with self.cond:
             self.buf += mono
             if len(self.buf) > self.LIMIT and not OFFLINE:
-                extra = len(self.buf) - self.LIMIT // 2
-                del self.buf[:extra - extra % 2]
+                frame = FRAME_SAMPLES * 2          # whole frames, so the stream position stays known
+                drop = (len(self.buf) - self.LIMIT // 2) // frame
+                del self.buf[:drop * frame]
+                self.gone += drop
                 self.lost += 1
             self.cond.notify()
+
+    def skipped(self):
+        """Frames dropped since the last call: the reader is that much further on in the stream."""
+        with self.cond:
+            gone, self.gone = self.gone, 0
+            return gone
 
     def close(self):
         with self.cond:
@@ -1196,6 +1205,8 @@ def run_odas():
                 if MIC.lost:
                     log("warn: ODAS fell behind; %d stretches of microphone sound skipped" % MIC.lost)
                     MIC.lost = 0
+                    one.flush()                # what was being said ends at the gap
+                    one.n += MIC.skipped()     # keep the place in the stream: playback is matched by it
                 one.feed(heard)
                 continue
             i = cur[0]
